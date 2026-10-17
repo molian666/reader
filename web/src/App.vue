@@ -522,7 +522,7 @@ export default {
       };
     },
     async login() {
-      const res = await Axios.post("/login", {
+      const res = await Axios.post(this.api + "/login", {
         ...this.loginForm,
         isLogin: this.isLogin
       });
@@ -595,7 +595,7 @@ export default {
     },
     loadTxtTocRules() {
       return cacheFirstRequest(
-        () => Axios.get("/getTxtTocRules"),
+        () => Axios.get(this.api + "/getTxtTocRules"),
         "txtTocRules"
       ).then(
         res => {

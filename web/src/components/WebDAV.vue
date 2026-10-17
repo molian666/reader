@@ -281,7 +281,9 @@ export default {
         res => {
           if (res.data.isSuccess) {
             this.$message.success("恢复成功");
-            this.init(true);
+            // 恢复后刷新书架、书源、分组等数据
+            this.$root.$children[0].init(true);
+            this.showWebdavFile(this.currentPath);
           }
         },
         error => {
@@ -300,7 +302,9 @@ export default {
       );
     },
     uploadToWebDAV() {
-      this.$refs.fileRef.dispatchEvent(new MouseEvent("click"));
+      if (this.$refs.fileRef) {
+        this.$refs.fileRef.click();
+      }
     },
     onFileChange(event) {
       if (!event.target || !event.target.files || !event.target.files.length) {

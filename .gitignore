@@ -50,3 +50,7 @@ out
 /server/logs
 /server/storage
 /server/target
+# packaging logs
+/packaging.log
+/bootjar.log
+/setup.log

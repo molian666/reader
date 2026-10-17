@@ -125,7 +125,10 @@ export default {
         origin: book.origin,
         originName: book.originName,
         latestChapterTitle: book.latestChapterTitle,
-        intro: book.intro
+        intro: book.intro,
+        // 章节内位置和时间，用于多设备阅读进度同步
+        durChapterPos: book.durChapterPos ?? 0,
+        durChapterTime: book.durChapterTime ?? 0
       };
       this.$emit("changeBook", readingBook);
     },

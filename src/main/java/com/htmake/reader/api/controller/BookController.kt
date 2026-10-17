@@ -52,6 +52,9 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.net.URL;
 import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID;
 import io.vertx.ext.web.client.WebClient
 import org.springframework.beans.factory.annotation.Autowired
@@ -394,17 +397,26 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         var bookUrl: String
         var chapterIndex: Int
+        var chapterPos: Int
+        var chapterTitle: String?
         if (context.request().method() == HttpMethod.POST) {
             // post 请求
             bookUrl = context.bodyAsJson.getString("url") ?: context.bodyAsJson.getJsonObject("searchBook").getString("bookUrl") ?: ""
             chapterIndex = context.bodyAsJson.getInteger("index", -1)
+            chapterPos = context.bodyAsJson.getInteger("pos", -1)
+            chapterTitle = context.bodyAsJson.getString("title")
         } else {
             // get 请求
             bookUrl = context.queryParam("url").firstOrNull() ?: ""
             chapterIndex = context.queryParam("index").firstOrNull()?.toInt() ?: -1
+            chapterPos = context.queryParam("pos").firstOrNull()?.toInt() ?: -1
+            chapterTitle = context.queryParam("title").firstOrNull()
         }
         if (bookUrl.isNullOrEmpty()) {
             return returnData.setErrorMsg("请输入书籍链接")
+        }
+        if (chapterIndex < 0) {
+            return returnData.setErrorMsg("章节不存在")
         }
         var userNameSpace = getUserNameSpace(context)
         // 看看有没有加入书架
@@ -422,11 +434,57 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return returnData.setErrorMsg("章节不存在")
         }
         var chapterInfo = chapterList.get(chapterIndex)
-        // 书架书籍保存阅读进度
-        saveShelfBookProgress(bookInfo, chapterInfo, userNameSpace)
-        // 保存到 webdav
-        saveBookProgressToWebdav(bookInfo, chapterInfo, userNameSpace)
-        return returnData.setData("")
+        chapterTitle?.let {
+            if (it.isNotEmpty()) {
+                chapterInfo.title = it
+            }
+        }
+        if (chapterPos < 0) {
+            // 没有传章节内位置时保留原有位置，避免把进度重置到章节开头
+            chapterPos = bookInfo.durChapterPos
+        }
+        // 书架书籍保存阅读进度（章节 + 章节内字符位置）
+        saveShelfBookProgress(bookInfo, chapterInfo, userNameSpace, chapterPos)
+        // 保存到 webdav，供阅读 App 等其他设备读取
+        saveBookProgressToWebdav(bookInfo, chapterInfo, userNameSpace, chapterPos)
+        return returnData.setData(mapOf(
+            "url" to bookInfo.bookUrl,
+            "index" to chapterIndex,
+            "pos" to chapterPos,
+            "title" to chapterInfo.title,
+            "time" to System.currentTimeMillis()
+        ))
+    }
+
+    /**
+     * 获取某本书在服务端记录的阅读进度，用于多设备续读
+     */
+    suspend fun getBookProgress(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        var bookUrl: String
+        if (context.request().method() == HttpMethod.POST) {
+            bookUrl = context.bodyAsJson.getString("url") ?: ""
+        } else {
+            bookUrl = context.queryParam("url").firstOrNull() ?: ""
+        }
+        if (bookUrl.isNullOrEmpty()) {
+            return returnData.setErrorMsg("请输入书籍链接")
+        }
+        var userNameSpace = getUserNameSpace(context)
+        var bookInfo = getShelfBookByURL(bookUrl, userNameSpace)
+            ?: return returnData.setErrorMsg("书籍未加入书架")
+        return returnData.setData(mapOf(
+            "url" to bookInfo.bookUrl,
+            "name" to bookInfo.name,
+            "author" to bookInfo.author,
+            "index" to bookInfo.durChapterIndex,
+            "pos" to bookInfo.durChapterPos,
+            "title" to (bookInfo.durChapterTitle ?: ""),
+            "time" to bookInfo.durChapterTime
+        ))
     }
 
     suspend fun getBookContent(context: RoutingContext): ReturnData {
@@ -1909,11 +1967,12 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         return null
     }
 
-    fun saveShelfBookProgress(book: Book, bookChapter: BookChapter, userNameSpace: String) {
+    fun saveShelfBookProgress(book: Book, bookChapter: BookChapter, userNameSpace: String, chapterPos: Int = 0) {
         editShelfBook(book, userNameSpace) { existBook ->
             existBook.durChapterIndex = bookChapter.index
             existBook.durChapterTitle = bookChapter.title
             existBook.durChapterTime = System.currentTimeMillis()
+            existBook.durChapterPos = chapterPos
 
             // logger.info("saveShelfBookProgress: {}", existBook)
 
@@ -2065,10 +2124,14 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var book = asJsonObject(progressFile.readText())?.mapTo(Book::class.java)
         if (book != null) {
             editShelfBook(book, userNameSpace) { existBook ->
-                existBook.durChapterIndex = book.durChapterIndex
-                existBook.durChapterPos = book.durChapterPos
-                existBook.durChapterTime = book.durChapterTime
-                existBook.durChapterTitle = book.durChapterTitle
+                // 只接受更新的进度，避免旧进度文件覆盖当前阅读位置
+                if (book.durChapterTime >= existBook.durChapterTime
+                    || book.durChapterIndex > existBook.durChapterIndex) {
+                    existBook.durChapterIndex = book.durChapterIndex
+                    existBook.durChapterPos = book.durChapterPos
+                    existBook.durChapterTime = book.durChapterTime
+                    existBook.durChapterTitle = book.durChapterTitle
+                }
 
                 logger.info("syncShelfBookProgress: {}", existBook)
                 existBook
@@ -2076,97 +2139,313 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
     }
 
-    suspend fun saveBookProgressToWebdav(book: Book, bookChapter: BookChapter, userNameSpace: String) {
+    // 每本书的进度写入锁，避免多设备同时保存时写出半截 JSON
+    private val progressWriteLocks = ConcurrentHashMap<String, Any>()
+
+    suspend fun saveBookProgressToWebdav(book: Book, bookChapter: BookChapter, userNameSpace: String, chapterPos: Int = 0) {
+        try {
+            val userHome = getUserWebdavHome(userNameSpace)
+            val bookProgressDir = findOrCreateProgressDir(userHome)
+            val fileName = getProgressFileName(book.name, book.author)
+            val progressFile = File(bookProgressDir, fileName)
+            val json = jsonEncode(mapOf(
+                "name" to book.name,
+                "author" to book.author,
+                "durChapterIndex" to bookChapter.index,
+                "durChapterPos" to chapterPos,
+                "durChapterTime" to System.currentTimeMillis(),
+                "durChapterTitle" to bookChapter.title
+            ), true)
+            val lock = progressWriteLocks.getOrPut(fileName) { Any() }
+            synchronized(lock) {
+                // 保留上一版本，误覆盖时可以回滚（点开头，WebDAV 列表中隐藏）
+                if (progressFile.exists()) {
+                    try {
+                        progressFile.copyTo(File(bookProgressDir, ".$fileName.bak"), overwrite = true)
+                    } catch (e: Exception) {
+                        // 备份失败不影响正常写入
+                    }
+                }
+                // 先写临时文件再原子替换，避免其他设备读到半截内容
+                val tmpFile = File(bookProgressDir, ".$fileName.tmp")
+                tmpFile.writeText(json)
+                try {
+                    Files.move(
+                        tmpFile.toPath(),
+                        progressFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE
+                    )
+                } catch (e: Exception) {
+                    tmpFile.copyTo(progressFile, overwrite = true)
+                    tmpFile.delete()
+                }
+            }
+        } catch (e: Exception) {
+            logger.error("saveBookProgressToWebdav error: {}", e.localizedMessage)
+        }
+    }
+
+    /**
+     * 同步状态自检：检查 WebDAV 进度目录、进度文件、备份文件是否正常
+     */
+    suspend fun getSyncStatus(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        val userNameSpace = getUserNameSpace(context)
         val userHome = getUserWebdavHome(userNameSpace)
-        var bookProgressDir = File(userHome + File.separator + "bookProgress")
-        if (!bookProgressDir.exists()) {
-            bookProgressDir = File(userHome + File.separator + "legado" + File.separator + "bookProgress")
-            if (!bookProgressDir.exists()) {
-                return
+        val progressDir = findProgressDir(userHome)
+        val progressFiles = progressDir?.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".json", true) }
+            ?: emptyList()
+        var backupDir = File(userHome + File.separator + "legado")
+        if (!backupDir.exists()) {
+            backupDir = File(userHome)
+        }
+        val backups = backupDir.listFiles()
+            ?.filter {
+                it.isFile && it.name.startsWith("backup", true) && it.name.endsWith(".zip", true)
+            }
+            ?: emptyList()
+        val latestBackup = backups.maxByOrNull { it.lastModified() }
+        val latestProgress = progressFiles.maxByOrNull { it.lastModified() }
+        return returnData.setData(mapOf(
+            "webdavHome" to userHome,
+            "webdavPath" to "/reader3/webdav/legado/",
+            "progressDir" to (progressDir?.absolutePath ?: ""),
+            "progressWritable" to (progressDir != null && progressDir.canWrite()),
+            "progressCount" to progressFiles.size,
+            "lastProgressTime" to (latestProgress?.lastModified() ?: 0L),
+            "backupCount" to backups.size,
+            "latestBackup" to (latestBackup?.name ?: ""),
+            "latestBackupTime" to (latestBackup?.lastModified() ?: 0L)
+        ))
+    }
+
+    // 设备列表写入锁
+    private val deviceLock = Any()
+
+    /**
+     * 记录/更新一台设备（Web 端上报，或从阅读 App 的 WebDAV 备份文件名识别）
+     */
+    fun touchDevice(
+        userNameSpace: String,
+        deviceId: String,
+        deviceName: String,
+        bookUrl: String? = null,
+        bookName: String? = null,
+        chapterTitle: String? = null,
+        userAgent: String? = null,
+        ip: String? = null
+    ) {
+        if (deviceId.isEmpty() || userAgent?.contains("JavaFX") == true) {
+            return
+        }
+        synchronized(deviceLock) {
+            try {
+                val devices = asJsonArray(getUserStorage(userNameSpace, "devices")) ?: JsonArray()
+                val list = devices.map { it as JsonObject }.toMutableList()
+                val now = System.currentTimeMillis()
+                val index = list.indexOfFirst { it.getString("deviceId") == deviceId }
+                val device = if (index >= 0) list[index] else JsonObject()
+                device.put("deviceId", deviceId)
+                device.put("deviceName", deviceName)
+                device.put("lastActive", now)
+                if (!bookUrl.isNullOrEmpty()) {
+                    device.put("bookUrl", bookUrl)
+                }
+                if (!bookName.isNullOrEmpty()) {
+                    device.put("bookName", bookName)
+                }
+                if (!chapterTitle.isNullOrEmpty()) {
+                    device.put("chapterTitle", chapterTitle)
+                }
+                if (!userAgent.isNullOrEmpty()) {
+                    device.put("userAgent", userAgent)
+                }
+                if (!ip.isNullOrEmpty()) {
+                    device.put("ip", ip)
+                }
+                if (index >= 0) {
+                    list[index] = device
+                } else {
+                    list.add(device)
+                }
+                // 只保留最近 90 天活跃的设备，最多 20 台
+                val keep = list
+                    .filter { now - (it.getLong("lastActive") ?: 0L) < 90L * 24 * 3600 * 1000 }
+                    .sortedByDescending { it.getLong("lastActive") ?: 0L }
+                    .take(20)
+                saveUserStorage(userNameSpace, "devices", JsonArray(keep))
+            } catch (e: Exception) {
+                logger.error("touchDevice error: {}", e.localizedMessage)
             }
         }
-        var progressFile = File(bookProgressDir.toString() + File.separator + book.name + "_" + book.author + ".json")
-        progressFile.writeText(jsonEncode(mapOf(
-            "name" to book.name,
-            "author" to book.author,
-            "durChapterIndex" to bookChapter.index,
-            "durChapterPos" to 0,
-            "durChapterTime" to System.currentTimeMillis(),
-            "durChapterTitle" to bookChapter.title
-        ), true))
+    }
+
+    /**
+     * Web 端上报设备与当前阅读信息
+     */
+    suspend fun reportDevice(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        val body = context.bodyAsJson
+        val deviceId = body?.getString("deviceId") ?: ""
+        if (deviceId.isEmpty()) {
+            return returnData.setErrorMsg("缺少设备标识")
+        }
+        val deviceName = body?.getString("deviceName") ?: "未知设备"
+        touchDevice(
+            getUserNameSpace(context),
+            deviceId,
+            deviceName,
+            body?.getString("bookUrl"),
+            body?.getString("bookName"),
+            body?.getString("chapterTitle"),
+            context.request().getHeader("User-Agent"),
+            context.request().remoteAddress()?.host()
+        )
+        return returnData.setData("")
+    }
+
+    /**
+     * 获取设备列表
+     */
+    suspend fun getDevices(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        val devices = asJsonArray(getUserStorage(getUserNameSpace(context), "devices")) ?: JsonArray()
+        val list = devices
+            .map { it as JsonObject }
+            .sortedByDescending { it.getLong("lastActive") ?: 0L }
+            .map { it.map }
+        return returnData.setData(list)
+    }
+
+    /**
+     * 移除设备记录
+     */
+    suspend fun deleteDevice(context: RoutingContext): ReturnData {
+        val returnData = ReturnData()
+        if (!checkAuth(context)) {
+            return returnData.setData("NEED_LOGIN").setErrorMsg("请登录后使用")
+        }
+        val deviceId = context.bodyAsJson?.getString("deviceId") ?: ""
+        if (deviceId.isEmpty()) {
+            return returnData.setErrorMsg("缺少设备标识")
+        }
+        val userNameSpace = getUserNameSpace(context)
+        val devices = asJsonArray(getUserStorage(userNameSpace, "devices")) ?: JsonArray()
+        val list = devices.map { it as JsonObject }.filterNot { it.getString("deviceId") == deviceId }
+        saveUserStorage(userNameSpace, "devices", JsonArray(list))
+        return returnData.setData("")
+    }
+
+    /**
+     * 找到（或创建）WebDAV 中的 bookProgress 目录。
+     * 阅读 App 默认把进度放在 <webdav根目录>/legado/bookProgress 下。
+     */
+    fun findOrCreateProgressDir(userHome: String): File {
+        val dir = findProgressDir(userHome)
+        if (dir != null) {
+            return dir
+        }
+        val newDir = File(userHome + File.separator + "legado" + File.separator + "bookProgress")
+        newDir.mkdirs()
+        return newDir
+    }
+
+    /**
+     * 只查找已存在的进度目录，不创建
+     */
+    fun findProgressDir(userHome: String): File? {
+        val candidates = arrayListOf(
+            File(userHome + File.separator + "bookProgress"),
+            File(userHome + File.separator + "legado" + File.separator + "bookProgress")
+        )
+        return candidates.firstOrNull { it.exists() && it.isDirectory }
+    }
+
+    private val progressFileNameRegex = Regex("[\\\\/:*?\"<>|]")
+
+    /**
+     * 与阅读 App 的进度文件名保持一致：
+     * UrlUtil.replaceReservedChar("${name}_${author}".normalizeFileName()) + ".json"
+     */
+    fun getProgressFileName(name: String, author: String): String {
+        var text = (name + "_" + author).replace(progressFileNameRegex, "_")
+        val reservedChars = linkedMapOf(
+            "%" to "%25", " " to "%20", "\"" to "%22", "#" to "%23", "&" to "%26",
+            "(" to "%28", ")" to "%29", "+" to "%2B", "," to "%2C", "/" to "%2F",
+            ":" to "%3A", ";" to "%3B", "<" to "%3C", "=" to "%3D", ">" to "%3E",
+            "?" to "%3F", "@" to "%40", "\\" to "%5C", "|" to "%7C"
+        )
+        reservedChars.forEach { (key, value) ->
+            text = text.replace(key, value)
+        }
+        return "$text.json"
     }
 
     suspend fun syncFromWebdav(zipFilePath: String, userNameSpace: String): Boolean {
-        var descDir = getWorkDir("storage", "data", userNameSpace, "tmp")
-        var descDirFile = File(descDir)
+        val descDir = getWorkDir("storage", "data", userNameSpace, "tmp")
+        val descDirFile = File(descDir)
         try {
             val userHome = getUserWebdavHome(userNameSpace)
-            var zipFile = File(zipFilePath)
+            val zipFile = File(zipFilePath)
             if (!zipFile.exists()) {
                 return false
             }
             descDirFile.deleteRecursively()
-            if (zipFile.unzip(descDir)) {
-                // 同步 书源
-                val bookSourceFile = File(descDir + File.separator + "bookSource.json")
-                if (bookSourceFile.exists()) {
-                    val userBookSourceFile = File(getWorkDir("storage", "data", userNameSpace, "bookSource.json"))
-                    userBookSourceFile.deleteRecursively()
-                    bookSourceFile.renameTo(userBookSourceFile)
-                }
-                // 同步 书架
-                val bookshelfFile = File(descDir + File.separator + "bookshelf.json")
-                if (bookshelfFile.exists()) {
-                    val userBookSourceFile = File(getWorkDir("storage", "data", userNameSpace, "bookshelf.json"))
-                    userBookSourceFile.deleteRecursively()
-                    bookshelfFile.renameTo(userBookSourceFile)
-                }
-                // 同步 书籍分组
-                val bookGroupFile = File(descDir + File.separator + "bookGroup.json")
-                if (bookGroupFile.exists()) {
-                    val userBookGroupFile = File(getWorkDir("storage", "data", userNameSpace, "bookGroup.json"))
-                    userBookGroupFile.deleteRecursively()
-                    bookGroupFile.renameTo(userBookGroupFile)
-                }
-                // 同步 RSS订阅
-                val rssSourcesFile = File(descDir + File.separator + "rssSources.json")
-                if (rssSourcesFile.exists()) {
-                    val userRssSourcesFile = File(getWorkDir("storage", "data", userNameSpace, "rssSources.json"))
-                    userRssSourcesFile.deleteRecursively()
-                    rssSourcesFile.renameTo(userRssSourcesFile)
-                }
-                // 同步 替换规则
-                val replaceRuleFile = File(descDir + File.separator + "replaceRule.json")
-                if (replaceRuleFile.exists()) {
-                    val userReplaceRuleFile = File(getWorkDir("storage", "data", userNameSpace, "replaceRule.json"))
-                    userReplaceRuleFile.deleteRecursively()
-                    replaceRuleFile.renameTo(userReplaceRuleFile)
-                }
-                // 同步 书签
-                val bookmarkFile = File(descDir + File.separator + "bookmark.json")
-                if (bookmarkFile.exists()) {
-                    val userBookmarkFile = File(getWorkDir("storage", "data", userNameSpace, "bookmark.json"))
-                    userBookmarkFile.deleteRecursively()
-                    bookmarkFile.renameTo(userBookmarkFile)
-                }
-                // 同步阅读进度
-                var bookProgressDir = File(userHome + File.separator + "bookProgress")
-                if (!bookProgressDir.exists()) {
-                    bookProgressDir = File(userHome + File.separator +  "legado" + File.separator +  "bookProgress")
-                }
-                if (bookProgressDir.exists() && bookProgressDir.isDirectory()) {
-                    bookProgressDir.listFiles().forEach{
-                        syncBookProgressFromWebdav(it, userNameSpace)
+            if (!zipFile.unzip(descDir)) {
+                logger.error("unzip backup failed: {}", zipFilePath)
+                return false
+            }
+            // 同步书架、书源、分组、RSS、替换规则、书签
+            val dataFiles = arrayOf(
+                "bookSource.json",
+                "bookshelf.json",
+                "bookGroup.json",
+                "rssSources.json",
+                "replaceRule.json",
+                "bookmark.json"
+            )
+            var restoredCount = 0
+            dataFiles.forEach { fileName ->
+                val src = File(descDir + File.separator + fileName)
+                if (src.exists()) {
+                    val dest = File(getWorkDir("storage", "data", userNameSpace, fileName))
+                    dest.deleteRecursively()
+                    if (src.copyRecursively(dest, true)) {
+                        restoredCount++
+                        logger.info("restore {} success", fileName)
+                    } else {
+                        logger.error("restore {} failed", fileName)
                     }
                 }
-                return true
             }
-        } catch(e: Exception) {
-            e.printStackTrace()
+            // 同步阅读进度（App 的 bookProgress 独立于备份包）
+            var bookProgressDir = File(userHome + File.separator + "bookProgress")
+            if (!bookProgressDir.exists()) {
+                bookProgressDir = File(userHome + File.separator + "legado" + File.separator + "bookProgress")
+            }
+            if (bookProgressDir.exists() && bookProgressDir.isDirectory) {
+                bookProgressDir.listFiles()?.forEach {
+                    syncBookProgressFromWebdav(it, userNameSpace)
+                }
+            }
+            return restoredCount > 0
+        } catch (e: Exception) {
+            logger.error("syncFromWebdav error: {}", e.localizedMessage)
         } finally {
             descDirFile.deleteRecursively()
         }
-        return true;
+        return false
     }
 
     suspend fun saveToWebdav(latestZipFilePath: String, userNameSpace: String): Boolean {
@@ -2175,9 +2454,19 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         descDirFile.deleteRecursively()
         try {
             val userHome = getUserWebdavHome(userNameSpace)
-            var legadoHome = userHome
-            if (latestZipFilePath.indexOf("legado") > 0) {
-                legadoHome = userHome + File.separator + "legado"
+            // 阅读 App 默认使用 legado 子目录，优先写到该目录，保证 App 能读取
+            var legadoHome = userHome + File.separator + "legado"
+            val legadoDir = File(legadoHome)
+            if (!legadoDir.exists()) {
+                val hasRootBackup = File(userHome).listFiles()?.any {
+                    it.isFile && it.name.startsWith("backup", true) && it.name.endsWith(".zip", true)
+                } == true
+                if (hasRootBackup) {
+                    // 兼容旧版本直接放在根目录的备份
+                    legadoHome = userHome
+                } else {
+                    legadoDir.mkdirs()
+                }
             }
             var zipFile = File(latestZipFilePath)
             if (zipFile.unzip(descDir)) {
@@ -2200,32 +2489,33 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 if (userBookGroupFile.exists()) {
                     val bookGroupFile = File(descDir + File.separator + "bookGroup.json")
                     bookGroupFile.deleteRecursively()
-                    userBookGroupFile.renameTo(bookGroupFile)
+                    userBookGroupFile.copyRecursively(bookGroupFile)
                 }
                 // 同步 RSS订阅
                 val userRssSourcesFile = File(getWorkDir("storage", "data", userNameSpace, "rssSources.json"))
                 if (userRssSourcesFile.exists()) {
                     val rssSourcesFile = File(descDir + File.separator + "rssSources.json")
                     rssSourcesFile.deleteRecursively()
-                    userRssSourcesFile.renameTo(rssSourcesFile)
+                    userRssSourcesFile.copyRecursively(rssSourcesFile)
                 }
                 // 同步 替换规则
                 val userReplaceRuleFile = File(getWorkDir("storage", "data", userNameSpace, "replaceRule.json"))
                 if (userReplaceRuleFile.exists()) {
                     val replaceRuleFile = File(descDir + File.separator + "replaceRule.json")
                     replaceRuleFile.deleteRecursively()
-                    userReplaceRuleFile.renameTo(replaceRuleFile)
+                    userReplaceRuleFile.copyRecursively(replaceRuleFile)
                 }
                 // 同步 书签
                 val userBookmarkFile = File(getWorkDir("storage", "data", userNameSpace, "bookmark.json"))
                 if (userBookmarkFile.exists()) {
                     val bookmarkFile = File(descDir + File.separator + "bookmark.json")
                     bookmarkFile.deleteRecursively()
-                    userBookmarkFile.renameTo(bookmarkFile)
+                    userBookmarkFile.copyRecursively(bookmarkFile)
                 }
                 // 压缩
                 val today = SimpleDateFormat("yyyy-MM-dd").format(System.currentTimeMillis())
-                return descDirFile.zip(legadoHome + File.separator + "backup" + today + ".zip")
+                // 加上 -reader 后缀，避免覆盖阅读 App 当天自己的备份
+                return descDirFile.zip(legadoHome + File.separator + "backup" + today + "-reader.zip")
             }
         } catch(e: Exception) {
             e.printStackTrace()
@@ -2245,18 +2535,51 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             return null
         }
         var latestZipFile: String? = null
-        val zipFileReg = Regex("^backup[0-9-]+.zip$", RegexOption.IGNORE_CASE)    //忽略大小写
-        legadoHome.listFiles().also{
-            it.sortByDescending {
-                it.lastModified()
-            }
-        }.forEach {
-            if (zipFileReg.matches(it.name)) {
+        // 兼容阅读 App 的备份命名：backup2024-01-01.zip / backup2024-01-01-设备名.zip / backup.zip
+        val zipFileReg = Regex("^backup.*\\.zip$", RegexOption.IGNORE_CASE)
+        val sortedFiles = legadoHome.listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
+        sortedFiles.forEach {
+            if (latestZipFile == null && zipFileReg.matches(it.name)) {
                 latestZipFile = it.toString()
-                return@forEach
             }
         }
         return latestZipFile
+    }
+
+    /**
+     * 没有现成的 App 备份时，用服务端现有数据生成一个备份包
+     */
+    suspend fun createBackupZip(userNameSpace: String): String? {
+        val descDir = getWorkDir("storage", "data", userNameSpace, "tmp_backup")
+        val descDirFile = File(descDir)
+        descDirFile.deleteRecursively()
+        descDirFile.mkdirs()
+        try {
+            val dataFiles = arrayOf(
+                "bookshelf.json",
+                "bookSource.json",
+                "bookGroup.json",
+                "rssSources.json",
+                "replaceRule.json",
+                "bookmark.json"
+            )
+            dataFiles.forEach { fileName ->
+                val file = File(getWorkDir("storage", "data", userNameSpace, fileName))
+                if (file.exists()) {
+                    file.copyRecursively(File(descDir, fileName), true)
+                }
+            }
+            val zipFilePath = getWorkDir("storage", "data", userNameSpace, "backup.zip")
+            File(zipFilePath).deleteRecursively()
+            if (descDirFile.zip(zipFilePath)) {
+                return zipFilePath
+            }
+        } catch (e: Exception) {
+            logger.error("createBackupZip error: {}", e.localizedMessage)
+        } finally {
+            descDirFile.deleteRecursively()
+        }
+        return null
     }
 
     // 从本地导入文件预览

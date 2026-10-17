@@ -58,6 +58,9 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.TimeZone;
 import io.legado.app.utils.EncoderUtils
 import io.legado.app.model.rss.Rss
 import org.springframework.scheduling.annotation.Scheduled
@@ -280,10 +283,14 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
 
         var fileUrl = context.request().absoluteURI()
 
+        val rfc1123Format = SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        rfc1123Format.timeZone = TimeZone.getTimeZone("GMT")
+
         // 只支持一级
         var formatter = { f: File, url: String, showName: Boolean ->
             var name = if(showName) f.name else ""
-            var modifiedDate = SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(f.lastModified())
+            // 阅读 App 使用 RFC 1123 解析 getlastmodified，格式不对会被当成 0，导致进度/备份判断失效
+            var modifiedDate = rfc1123Format.format(Date(f.lastModified()))
             if (f.isFile()) {
                 String.format(fileResponse, url, modifiedDate, modifiedDate, name, f.length(), "")
             } else {
@@ -349,15 +356,36 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         }
         try {
             file.writeBytes(context.getBody().getBytes())
-            // 同步用户进度
-            if (file.toString().indexOf("/bookProgress/") > 0 && file.toString().indexOf(".json") > 0) {
-                val userNameSpace = getUserNameSpace(context)
-                BookController(coroutineContext).syncBookProgressFromWebdav(file, userNameSpace)
+            val userNameSpace = getUserNameSpace(context)
+            val bookController = BookController(coroutineContext)
+            // 阅读 App 上传进度文件时，立即同步到服务端书架
+            if (file.parentFile?.name == "bookProgress" && file.name.endsWith(".json", true)) {
+                bookController.syncBookProgressFromWebdav(file, userNameSpace)
+            }
+            // 阅读 App 上传备份时，按文件名中的设备名记录设备
+            if (file.name.startsWith("backup", true) && file.name.endsWith(".zip", true)) {
+                val deviceName = parseBackupDeviceName(file.name)
+                bookController.touchDevice(
+                    userNameSpace,
+                    "webdav:$deviceName",
+                    deviceName,
+                    userAgent = context.request().getHeader("User-Agent"),
+                    ip = context.request().remoteAddress()?.host()
+                )
             }
             context.response().setStatusCode(201).end()
         } catch(e: Exception) {
             context.response().setStatusCode(500).end()
         }
+    }
+
+    /**
+     * 从 backup2026-10-18-Pixel8.zip 中解析设备名
+     */
+    private fun parseBackupDeviceName(fileName: String): String {
+        val name = fileName.removeSuffix(".zip")
+        val regex = Regex("^backup\\d{4}-\\d{2}-\\d{2}-(.+)$")
+        return regex.find(name)?.groupValues?.get(1)?.takeIf { it.isNotBlank() } ?: "阅读 App"
     }
 
     suspend fun webdavDownload(context: RoutingContext) {
@@ -785,9 +813,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
         val userNameSpace = getUserNameSpace(context)
         var latestZipFilePath = bookController.getLastBackFileFromWebdav(userNameSpace)
         if (latestZipFilePath == null) {
-            return returnData.setErrorMsg("请先使用阅读App备份到webdav")
+            // 没有 App 备份时，直接用服务端现有数据生成一个备份
+            latestZipFilePath = bookController.createBackupZip(userNameSpace)
         }
-        if (!bookController.saveToWebdav(latestZipFilePath, userNameSpace)) {
+        if (latestZipFilePath == null || !bookController.saveToWebdav(latestZipFilePath, userNameSpace)) {
             return returnData.setErrorMsg("备份失败")
         }
         return returnData.setData("")

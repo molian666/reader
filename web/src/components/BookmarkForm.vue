@@ -85,7 +85,7 @@ export default {
         return;
       }
       const form = { ...this.bookmarkForm };
-      Axios.post("/saveBookmark", form).then(
+      Axios.post(this.api + "/saveBookmark", form).then(
         res => {
           if (res.data.isSuccess) {
             this.$message.success((this.isAdd ? "新增" : "编辑") + "书签成功");

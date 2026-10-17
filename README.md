@@ -56,6 +56,46 @@
 
 详见[文档](https://github.com/hectorqin/reader/blob/master/doc.md)
 
+## Windows 安装包
+
+- `LegadoReader-2.5.4-Setup.exe`：自带精简 JRE，按当前用户安装到 `%LOCALAPPDATA%\LegadoReader`，创建开始菜单快捷方式，无需管理员权限。
+- `LegadoReader-2.5.4-portable.zip`：解压后运行 `Reader.exe`，数据保存在同目录 `storage`。
+- 安装包未做代码签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+
+安装包构建方法见 [installer/README.md](installer/README.md)，发布说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+
+## 本地构建与运行
+
+需要 JDK 11 与 Node.js（建议 16 及以上）。
+
+```bash
+cd web
+npm install
+npm run build
+# 把前端产物同步到服务端静态资源目录
+rm -rf ../src/main/resources/web && mv dist ../src/main/resources/web
+
+cd ..
+./gradlew bootRun
+```
+
+Windows 使用 `gradlew.bat bootRun`。启动后访问 http://localhost:8080 ，默认不开启登录（`reader.app.secure=false`）。
+
+前端依赖已通过 `overrides` 锁定 `lodash 4.17.21`、`lodash.template 4.5.0`：新版 lodash 会让 workbox 生成 service worker 时报 `assignWith is not defined`，导致 `npm run build` 失败。
+
+## 与阅读 App 同步（含 legado-with-MD3）
+
+- App 的 WebDAV 地址填 `http://<服务器地址>:8080/reader3/webdav/`，子目录保持默认 `legado`。
+- Web 端阅读进度会写入 `legado/bookProgress/<书名>_<作者>.json`，文件名、字段与 App 的规则一致；App 打开书籍时会按该进度续读。
+- App 上传的进度文件（`bookProgress/*.json`）会即时同步到服务端书架，Web 端打开书即从上次位置继续。
+- 左侧菜单的 WebDAV 里点“保存备份”，会把服务端书架、书源、分组、书签等写成 `backup<日期>-reader.zip`，App 可在恢复列表里选择；没有 App 备份时也会直接生成。
+- 阅读页左侧工具栏有同步状态：`同步中 / 已同步 / 待同步`，点一下可立即同步；网络失败会进入待同步队列，联网或 30 秒后自动重试。
+- 打开书籍时若云端进度更新，顶部会提示“已同步其它设备进度：第 X 章”，8 秒内可点“撤销”回到原来的位置。
+- 两端都在最近 10 分钟内读过、且章节相差 2 章以上时，会弹窗让用户选择“使用云端进度”或“保留当前进度”，不再直接覆盖。
+- 左侧菜单 WebDAV 里的“设备管理”会列出所有设备（Web 浏览器按 UA 命名，App 按备份文件名识别），显示最近活跃时间、正在读的章节，可移除设备。
+- 左侧菜单 WebDAV 里的“同步自检”会列出 WebDAV 目录、App 应填写的地址、进度目录是否可写、进度文件数量与最近写入时间、备份数量与最新备份。
+- 书架右上角可在“单列列表 / 多列网格”之间切换，选择保存在浏览器本地。
+
 ## 问题
 
 - 部分使用了 `Javascript` 的书源可能会报错，如调用原生java等高级Javascript功能

@@ -9,6 +9,16 @@
     }"
     ref="chapterWrapperRef"
   >
+    <div class="sync-toast" v-if="syncToast">
+      <i class="el-icon-cloudy"></i>
+      <span class="sync-toast-text">{{ syncToast.text }}</span>
+      <span
+        class="sync-toast-undo"
+        v-if="syncToast.previous"
+        @click="undoSyncJump"
+        >撤销</span
+      >
+    </div>
     <div class="tool-bar" :style="leftBarTheme">
       <div class="tools">
         <el-popover
@@ -103,6 +113,16 @@
             <div class="icon-text">设置</div>
           </div>
         </el-popover>
+        <div
+          class="tool-icon"
+          @click="manualSyncProgress"
+          :title="syncTitle"
+        >
+          <div class="tool-el-icon">
+            <i :class="syncIconClass"></i>
+          </div>
+          <div class="icon-text">{{ syncStatusText }}</div>
+        </div>
         <div
           class="tool-icon"
           @click="toShelf"
@@ -457,6 +477,7 @@ import Axios from "../plugins/axios";
 import jump from "../plugins/jump";
 import Animate from "../plugins/animate";
 import { setCache, getCache } from "../plugins/cache";
+import { getDeviceId, getDeviceName } from "../plugins/device";
 import { simplized, traditionalized } from "../plugins/chinese";
 import {
   LimitResquest,
@@ -487,6 +508,21 @@ export default {
       }
     }
     window.addEventListener("unload", this.saveReadingPosition);
+    window.addEventListener("pagehide", this.onPageHide);
+    window.addEventListener("online", this.onOnline);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+    // 每隔一段时间自动同步一次进度，避免异常退出丢进度
+    this.progressTimer = setInterval(() => {
+      if (document.visibilityState === "visible" && this.startSavePosition) {
+        this.saveReadingPosition();
+        this.saveBookProgress();
+      }
+      this.flushPendingProgress();
+      this.reportDeviceTick += 1;
+      if (this.reportDeviceTick % 2 === 0) {
+        this.reportDevice();
+      }
+    }, 30000);
     eventBus.$on("showSearchContent", data => {
       if (this._inactive) {
         return;
@@ -566,6 +602,7 @@ export default {
     this.$Lazyload.$on("loaded", this.lazyloadHandler);
   },
   deactivated() {
+    this.saveReadingPosition();
     this.saveBookProgress();
     this.startSavePosition = false;
     this.lastReadingBook = this.$store.getters.readingBook;
@@ -575,6 +612,15 @@ export default {
     this.unwatchFn && this.unwatchFn();
     this.releaseWakeLockFn && this.releaseWakeLockFn();
     this.$Lazyload.$off("loaded", this.lazyloadHandler);
+  },
+  beforeDestroy() {
+    this.saveReadingPosition();
+    this.saveBookProgress();
+    this.progressTimer && clearInterval(this.progressTimer);
+    window.removeEventListener("pagehide", this.onPageHide);
+    window.removeEventListener("online", this.onOnline);
+    window.removeEventListener("unload", this.saveReadingPosition);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
   },
   watch: {
     chapterName(to) {
@@ -722,6 +768,19 @@ export default {
 
       startSavePosition: false,
 
+      // 当前章节内的字符偏移，用于多设备之间同步阅读位置
+      currentChapterPos: 0,
+      progressTimer: null,
+      progressSyncedKey: "",
+
+      // 进度同步状态：idle / syncing / synced / offline
+      syncState: "idle",
+      lastSyncAt: 0,
+      syncToast: null,
+      syncToastTimer: null,
+      reportDeviceTick: 0,
+      localProgressTimeAtOpen: 0,
+
       showCacheContentZone: false,
       isCachingContent: false,
       cachingContentTip: "",
@@ -740,6 +799,40 @@ export default {
   computed: {
     readingBook() {
       return this.$store.getters.readingBook || {};
+    },
+    syncStatusText() {
+      switch (this.syncState) {
+        case "syncing":
+          return "同步中";
+        case "synced":
+          return "已同步";
+        case "offline":
+          return "待同步";
+        default:
+          return "同步";
+      }
+    },
+    syncIconClass() {
+      switch (this.syncState) {
+        case "syncing":
+          return "el-icon-loading";
+        case "synced":
+          return "el-icon-cloudy";
+        case "offline":
+          return "el-icon-warning-outline";
+        default:
+          return "el-icon-upload2";
+      }
+    },
+    syncTitle() {
+      if (!this.lastSyncAt) {
+        return "点击同步阅读进度";
+      }
+      return (
+        "上次同步 " +
+        new Date(this.lastSyncAt).format("hh:mm:ss") +
+        "，点击立即同步"
+      );
     },
     catalog() {
       return (this.$store.getters.readingBook || {}).catalog || [];
@@ -1122,7 +1215,17 @@ export default {
             this.$store.commit("setReadingBook", book);
             this.$emit("loadCatalog");
             var index = book.index || 0;
+            // 记录打开时的本地进度时间，用于判断是否为“两端同时阅读”的冲突
+            this.localProgressTimeAtOpen =
+              +getCache(
+                "bookChapterProgress@" + book.name + "_" + book.author + "@time"
+              ) || 0;
             this.getContent(index);
+            this.reportDevice();
+            if (init) {
+              // 打开书籍时拉取一次服务端进度，实现多设备续读
+              this.syncProgressFromServer(book);
+            }
           } else {
             if (init) {
               this.title = "";
@@ -1140,6 +1243,63 @@ export default {
             "获取书籍目录列表 " + (error && error.toString())
           );
         }
+      );
+    },
+    syncProgressFromServer(book) {
+      if (!book || !book.bookUrl) {
+        return;
+      }
+      if (this.progressSyncedKey === book.bookUrl) {
+        return;
+      }
+      this.progressSyncedKey = book.bookUrl;
+      Axios.get(this.api + "/getBookProgress", {
+        params: { url: book.bookUrl },
+        silent: true
+      }).then(
+        res => {
+          if (!res.data || !res.data.isSuccess || !res.data.data) {
+            return;
+          }
+          const progress = res.data.data;
+          const current = this.$store.getters.readingBook;
+          if (!current || current.bookUrl !== book.bookUrl) {
+            return;
+          }
+          const index = +progress.index || 0;
+          const pos = +progress.pos || 0;
+          if (index > this.chapterIndex) {
+            const previous = {
+              index: this.chapterIndex,
+              pos: this.currentChapterPos || 0
+            };
+            const localTime = this.localProgressTimeAtOpen || 0;
+            const cloudTime = +progress.time || 0;
+            const now = Date.now();
+            const bothRecent =
+              cloudTime > now - 10 * 60 * 1000 &&
+              localTime > now - 10 * 60 * 1000;
+            // 两端都在最近 10 分钟内读过且章节差 ≥ 2，交给用户选择
+            if (bothRecent && index - this.chapterIndex >= 2) {
+              this.promptSyncConflict(progress, previous);
+              return;
+            }
+            this.applyCloudProgress(index, pos, previous);
+            return;
+          }
+          if (
+            index === this.chapterIndex &&
+            pos > 0 &&
+            !getCache(
+              "bookChapterProgress@" + current.name + "_" + current.author
+            )
+          ) {
+            this.$nextTick(() => {
+              this.showPosition(pos);
+            });
+          }
+        },
+        () => {}
       );
     },
     getCatalog(refresh) {
@@ -1477,17 +1637,297 @@ export default {
         });
       });
     },
-    saveBookProgress() {
-      return Axios.post(
-        this.api + "/saveBookProgress",
+    reportDevice() {
+      const book = this.$store.getters.readingBook;
+      if (!this.api || !book || !book.bookUrl) {
+        return;
+      }
+      const chapter = (this.catalog || [])[this.chapterIndex];
+      Axios.post(
+        this.api + "/reportDevice",
         {
-          url: this.$store.getters.readingBook.bookUrl,
-          index: this.chapterIndex
+          deviceId: getDeviceId(),
+          deviceName: getDeviceName(),
+          bookUrl: book.bookUrl,
+          bookName: book.name,
+          chapterTitle: (chapter && chapter.title) || this.title || ""
         },
-        {
-          silent: true
-        }
+        { silent: true }
       ).catch(() => {});
+    },
+    applyCloudProgress(index, pos, previous) {
+      const chapter = (this.catalog || [])[index];
+      this.showSyncToast(
+        "已同步其它设备进度" + (chapter ? "：" + chapter.title : ""),
+        previous
+      );
+      this.$once("showContent", () => {
+        if (pos > 0) {
+          this.$nextTick(() => {
+            this.showPosition(pos);
+          });
+        }
+      });
+      this.getContent(index);
+    },
+    promptSyncConflict(progress, previous) {
+      const cloudIndex = +progress.index || 0;
+      const cloudChapter = (this.catalog || [])[cloudIndex];
+      const cloudTitle =
+        progress.title || (cloudChapter && cloudChapter.title) || "";
+      const localChapter = (this.catalog || [])[this.chapterIndex];
+      const localTitle = (localChapter && localChapter.title) || "";
+      const cloudTime = progress.time
+        ? new Date(+progress.time).format("hh:mm")
+        : "";
+      const message =
+        `<div>检测到两台设备都在最近 10 分钟内读过：</div>` +
+        `<div style="margin-top:8px">云端：第 ${cloudIndex + 1} 章` +
+        (cloudTitle ? ` · ${cloudTitle}` : "") +
+        (cloudTime ? `（${cloudTime}）` : "") +
+        `</div>` +
+        `<div>当前：第 ${this.chapterIndex + 1} 章` +
+        (localTitle ? ` · ${localTitle}` : "") +
+        `</div>` +
+        `<div style="margin-top:8px;color:#909399">选择要保留的阅读进度</div>`;
+      this.$confirm(message, "选择阅读进度", {
+        dangerouslyUseHTMLString: true,
+        confirmButtonText: "使用云端进度",
+        cancelButtonText: "保留当前进度",
+        distinguishCancelAndClose: true,
+        type: "warning"
+      })
+        .then(() => {
+          this.applyCloudProgress(cloudIndex, +progress.pos || 0, previous);
+        })
+        .catch(action => {
+          if (action === "cancel") {
+            // 保留当前设备进度，并立即写回服务端
+            this.showSyncToast("已保留当前设备的阅读进度", null);
+            this.saveBookProgress();
+          }
+        });
+    },
+    buildProgressParams() {
+      const book = this.$store.getters.readingBook;
+      if (!book || !book.bookUrl) {
+        return null;
+      }
+      let info = { index: this.chapterIndex, pos: this.currentChapterPos || 0 };
+      try {
+        info = this.currentPositionInfo();
+      } catch (error) {
+        // 取不到 DOM 位置时退回到上一次记录的位置
+      }
+      this.currentChapterPos = info.pos;
+      const params = {
+        url: book.bookUrl,
+        index: info.index,
+        pos: info.pos
+      };
+      const chapter = (this.catalog || [])[info.index];
+      if (chapter && chapter.title) {
+        params.title = chapter.title;
+      }
+      return params;
+    },
+    postBookProgress(params) {
+      return Axios.post(this.api + "/saveBookProgress", params, {
+        silent: true
+      }).then(
+        res => !!(res.data && res.data.isSuccess),
+        () => false
+      );
+    },
+    saveBookProgress() {
+      const params = this.buildProgressParams();
+      if (!params) {
+        return Promise.resolve(false);
+      }
+      this.syncState = "syncing";
+      return this.postBookProgress(params).then(ok => {
+        if (ok) {
+          this.syncState = "synced";
+          this.lastSyncAt = Date.now();
+          this.removePendingProgress(params.url);
+        } else {
+          this.syncState = "offline";
+          this.queuePendingProgress(params);
+        }
+        return ok;
+      });
+    },
+    manualSyncProgress() {
+      this.saveReadingPosition();
+      const params = this.buildProgressParams();
+      if (!params) {
+        this.$message.warning("请先打开一本书");
+        return;
+      }
+      this.syncState = "syncing";
+      this.postBookProgress(params).then(ok => {
+        if (ok) {
+          this.syncState = "synced";
+          this.lastSyncAt = Date.now();
+          this.removePendingProgress(params.url);
+          this.$message.success("阅读进度已同步");
+        } else {
+          this.syncState = "offline";
+          this.queuePendingProgress(params);
+          this.$message.warning("同步失败，已加入待同步队列，联网后自动重试");
+        }
+      });
+    },
+    pendingProgressKey() {
+      return "pendingBookProgress";
+    },
+    queuePendingProgress(params) {
+      try {
+        const queue = JSON.parse(getCache(this.pendingProgressKey()) || "{}");
+        queue[params.url] = params;
+        setCache(this.pendingProgressKey(), JSON.stringify(queue));
+      } catch (error) {
+        //
+      }
+    },
+    removePendingProgress(url) {
+      try {
+        const queue = JSON.parse(getCache(this.pendingProgressKey()) || "{}");
+        if (queue[url]) {
+          delete queue[url];
+          setCache(this.pendingProgressKey(), JSON.stringify(queue));
+        }
+      } catch (error) {
+        //
+      }
+    },
+    flushPendingProgress() {
+      let queue = {};
+      try {
+        queue = JSON.parse(getCache(this.pendingProgressKey()) || "{}");
+      } catch (error) {
+        return;
+      }
+      Object.keys(queue).forEach(url => {
+        this.postBookProgress(queue[url]).then(ok => {
+          if (ok) {
+            this.syncState = "synced";
+            this.lastSyncAt = Date.now();
+            this.removePendingProgress(url);
+          }
+        });
+      });
+    },
+    onOnline() {
+      this.flushPendingProgress();
+    },
+    showSyncToast(text, previous) {
+      this.syncToast = { text, previous };
+      this.syncToastTimer && clearTimeout(this.syncToastTimer);
+      this.syncToastTimer = setTimeout(() => {
+        this.syncToast = null;
+      }, 8000);
+    },
+    undoSyncJump() {
+      const previous = this.syncToast && this.syncToast.previous;
+      this.syncToast = null;
+      this.syncToastTimer && clearTimeout(this.syncToastTimer);
+      if (!previous || typeof previous.index === "undefined") {
+        return;
+      }
+      if (previous.pos > 0) {
+        this.$once("showContent", () => {
+          this.$nextTick(() => {
+            this.showPosition(previous.pos);
+          });
+        });
+      }
+      this.getContent(previous.index);
+    },
+    currentPositionInfo() {
+      if (this.isEpub || this.isCarToon || this.isAudio || this.preCaching) {
+        return { index: this.chapterIndex, pos: this.currentChapterPos || 0 };
+      }
+      let position = this.currentChapterPos || 0;
+      let chapterIndex = this.chapterIndex;
+      const paragraph =
+        typeof this.getCurrentParagraph === "function"
+          ? this.getCurrentParagraph()
+          : this.currentParagraph;
+      const container = this.$refs.bookContentRef && this.$refs.bookContentRef.$el;
+      if (paragraph && container) {
+        let currentChapter = paragraph;
+        while (
+          currentChapter &&
+          typeof currentChapter.className === "string" &&
+          currentChapter.className.indexOf("chapter-content") < 0
+        ) {
+          currentChapter = currentChapter.parentNode;
+          if (currentChapter === container) {
+            break;
+          }
+        }
+        if (
+          currentChapter &&
+          currentChapter.dataset &&
+          typeof currentChapter.dataset.index !== "undefined"
+        ) {
+          chapterIndex = +currentChapter.dataset.index;
+          const pos = String(currentChapter.innerText || "").indexOf(
+            paragraph.innerText || ""
+          );
+          if (pos >= 0) {
+            position = pos;
+          }
+        }
+      }
+      return { index: chapterIndex, pos: position };
+    },
+    onVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        this.saveReadingPosition();
+        this.saveBookProgress();
+      }
+    },
+    onPageHide() {
+      this.saveReadingPosition();
+      if (!this.sendBookProgressBeacon()) {
+        this.saveBookProgress();
+      }
+    },
+    sendBookProgressBeacon() {
+      const book = this.$store.getters.readingBook;
+      if (!book || !book.bookUrl || !navigator.sendBeacon) {
+        return false;
+      }
+      let info = { index: this.chapterIndex, pos: this.currentChapterPos || 0 };
+      try {
+        info = this.currentPositionInfo();
+      } catch (error) {
+        //
+      }
+      let url = this.api + "/saveBookProgress";
+      const token = this.$store.state.token;
+      if (token) {
+        url += "?accessToken=" + encodeURIComponent(token);
+      }
+      try {
+        return navigator.sendBeacon(
+          url,
+          new Blob(
+            [
+              JSON.stringify({
+                url: book.bookUrl,
+                index: info.index,
+                pos: info.pos
+              })
+            ],
+            { type: "application/json" }
+          )
+        );
+      } catch (error) {
+        return false;
+      }
     },
     toTop(interval) {
       if (this.$store.state.miniInterface) {
@@ -2539,59 +2979,39 @@ export default {
         if (this.error || !this.startSavePosition) {
           return;
         }
-        let position = 0;
         if (this.isAudio) {
-          position = this.$refs.bookContentRef
+          this.currentChapterPos = this.$refs.bookContentRef
             ? this.$refs.bookContentRef.currentTime
             : 0;
         } else if (this.isEpub || this.isCarToon) {
-          position =
+          this.currentChapterPos =
             document.documentElement.scrollTop || document.body.scrollTop;
         } else {
           // 更新当前章节 和 当前段落
           if (this.preCaching) {
             return;
           }
-          this.currentParagraph = this.getCurrentParagraph();
-          if (this.currentParagraph) {
-            // 找到最近的 .chapter-content
-            let currentChapter = this.currentParagraph;
-            while (currentChapter.className.indexOf("chapter-content") < 0) {
-              currentChapter = currentChapter.parentNode;
-              if (currentChapter === this.$refs.bookContentRef.$el) {
-                break;
-              }
-            }
-            if (currentChapter) {
-              if (
-                currentChapter.dataset &&
-                typeof currentChapter.dataset.index !== "undefined"
-              ) {
-                const chapterIndex = +currentChapter.dataset.index;
-                if (chapterIndex != this.$store.getters.readingBook.index) {
-                  let book = { ...this.$store.getters.readingBook };
-                  book.index = chapterIndex;
-                  this.$store.commit("setReadingBook", book);
-                  // 保存阅读进度
-                  this.saveBookProgress();
-                  this.title = this.$store.getters.readingBook.catalog[
-                    chapterIndex
-                  ].title;
-                }
-              }
-              position = currentChapter.innerText.indexOf(
-                this.currentParagraph.innerText
-              );
+          const info = this.currentPositionInfo();
+          this.currentChapterPos = info.pos;
+          if (info.index != this.$store.getters.readingBook.index) {
+            let book = { ...this.$store.getters.readingBook };
+            book.index = info.index;
+            this.$store.commit("setReadingBook", book);
+            // 章节变化时立刻同步进度
+            this.saveBookProgress();
+            if (book.catalog && book.catalog[info.index]) {
+              this.title = book.catalog[info.index].title;
             }
           }
         }
-        setCache(
+        const cacheKey =
           "bookChapterProgress@" +
-            this.$store.getters.readingBook.name +
-            "_" +
-            this.$store.getters.readingBook.author,
-          position
-        );
+          this.$store.getters.readingBook.name +
+          "_" +
+          this.$store.getters.readingBook.author;
+        setCache(cacheKey, this.currentChapterPos);
+        // 记录本地进度时间，用于和云端进度比较新旧
+        setCache(cacheKey + "@time", Date.now());
       } catch (error) {
         //
       }
@@ -2604,12 +3024,24 @@ export default {
         if (this.error) {
           return;
         }
-        const lastPosition = getCache(
+        const cacheKey =
           "bookChapterProgress@" +
-            this.$store.getters.readingBook.name +
-            "_" +
-            this.$store.getters.readingBook.author
-        );
+          this.$store.getters.readingBook.name +
+          "_" +
+          this.$store.getters.readingBook.author;
+        let lastPosition = getCache(cacheKey);
+        const localTime = +getCache(cacheKey + "@time") || 0;
+        const book = this.$store.getters.readingBook || {};
+        const cloudPos = book.durChapterPos;
+        const cloudTime = +book.durChapterTime || 0;
+        // 云端进度更新时，优先使用云端的章节内位置
+        if (
+          cloudPos !== undefined &&
+          cloudPos !== null &&
+          cloudTime > localTime
+        ) {
+          lastPosition = cloudPos;
+        }
         if (lastPosition && +lastPosition) {
           this.$nextTick(() => {
             this.showPosition(+lastPosition, () => {
@@ -3070,6 +3502,36 @@ export default {
 </script>
 
 <style lang="stylus" scoped>
+.sync-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  max-width: 86vw;
+  padding: 10px 16px;
+  border-radius: 22px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+
+  .sync-toast-text {
+    margin: 0 12px 0 8px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .sync-toast-undo {
+    color: #ffd04b;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+}
+
 >>>.popper-component {
   margin-left: 10px;
 }

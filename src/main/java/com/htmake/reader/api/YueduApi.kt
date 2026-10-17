@@ -196,6 +196,15 @@ class YueduApi : RestVerticle() {
 
         // 保存阅读进度
         router.post("/reader3/saveBookProgress").coroutineHandler { bookController.saveBookProgress(it) }
+        // 获取阅读进度（多设备续读）
+        router.get("/reader3/getBookProgress").coroutineHandler { bookController.getBookProgress(it) }
+        router.post("/reader3/getBookProgress").coroutineHandler { bookController.getBookProgress(it) }
+        // 同步状态自检
+        router.get("/reader3/getSyncStatus").coroutineHandler { bookController.getSyncStatus(it) }
+        // 多设备管理
+        router.post("/reader3/reportDevice").coroutineHandler { bookController.reportDevice(it) }
+        router.get("/reader3/getDevices").coroutineHandler { bookController.getDevices(it) }
+        router.post("/reader3/deleteDevice").coroutineHandler { bookController.deleteDevice(it) }
 
         // 封面
         router.get("/reader3/cover").coroutineHandlerWithoutRes { bookController.getBookCover(it) }

@@ -399,6 +399,22 @@
             >
               保存备份
             </el-tag>
+            <el-tag
+              type="info"
+              :effect="isNight ? 'dark' : 'light'"
+              class="setting-btn"
+              @click="checkSyncStatus"
+            >
+              同步自检
+            </el-tag>
+            <el-tag
+              type="info"
+              :effect="isNight ? 'dark' : 'light'"
+              class="setting-btn"
+              @click="openDeviceDialog"
+            >
+              设备管理
+            </el-tag>
           </div>
         </div>
         <div class="setting-wrapper">
@@ -527,6 +543,19 @@
         >
           {{ showBookEditButton ? "取消" : "编辑" }}
         </div>
+        <div
+          class="title-btn"
+          v-if="!isSearchResult"
+          @click="toggleShelfLayout"
+          :title="shelfLayout === 'list' ? '切换为多列网格' : '切换为单列列表'"
+        >
+          <i
+            :class="
+              shelfLayout === 'list' ? 'el-icon-s-grid' : 'el-icon-s-unfold'
+            "
+          ></i>
+          {{ shelfLayout === "list" ? "网格" : "单列" }}
+        </div>
         <div class="title-btn" v-if="!isSearchResult" @click="refreshShelf">
           <i class="el-icon-loading" v-if="refreshLoading"></i>
           {{ refreshLoading ? "刷新中..." : "刷新" }}
@@ -560,6 +589,7 @@
       </div>
       <div
         class="books-wrapper"
+        :class="shelfLayout"
         ref="bookList"
         @touchstart="handleTouchStart"
         @touchmove="handleTouchMove"
@@ -998,6 +1028,60 @@
       v-model="showWebDAVManageDialog"
       @importFromLocalPathPreview="importMultiBooks"
     ></WebDAV>
+
+    <el-dialog
+      title="设备管理"
+      :visible.sync="showDeviceDialog"
+      :width="dialogWidth"
+      :top="dialogTop"
+      :fullscreen="collapseMenu"
+      :class="isWebApp && !isNight ? 'status-bar-light-bg-dialog' : ''"
+    >
+      <el-table :data="deviceList" size="small">
+        <el-table-column label="设备" min-width="160">
+          <template slot-scope="scope">
+            {{ scope.row.deviceName }}
+            <el-tag
+              v-if="scope.row.deviceId === myDeviceId"
+              size="mini"
+              type="success"
+              >本机</el-tag
+            >
+          </template>
+        </el-table-column>
+        <el-table-column label="最近活跃" width="120">
+          <template slot-scope="scope">{{
+            deviceTime(scope.row.lastActive)
+          }}</template>
+        </el-table-column>
+        <el-table-column label="正在读" min-width="180">
+          <template slot-scope="scope">
+            <span v-if="scope.row.bookName">
+              {{ scope.row.bookName }}
+              <span v-if="scope.row.chapterTitle">
+                · {{ scope.row.chapterTitle }}</span
+              >
+            </span>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="90">
+          <template slot-scope="scope">
+            <el-button
+              type="text"
+              style="color: #f56c6c"
+              @click="removeDevice(scope.row)"
+              >移除</el-button
+            >
+          </template>
+        </el-table-column>
+      </el-table>
+      <div slot="footer" class="dialog-footer">
+        <el-button size="medium" @click="showDeviceDialog = false"
+          >关闭</el-button
+        >
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -1011,6 +1095,7 @@ import { errorTypeList } from "../plugins/config";
 import { setCache, getCache } from "../plugins/cache";
 import eventBus from "../plugins/eventBus";
 import { formatSize, LimitResquest } from "../plugins/helper";
+import { getDeviceId, getDeviceName } from "../plugins/device";
 const buildURL = require("axios/lib/helpers/buildURL");
 import { isInContainer } from "element-ui/src/utils/dom";
 import Vue from "vue";
@@ -1102,6 +1187,10 @@ export default {
 
       showWebDAVManageDialog: false,
 
+      showDeviceDialog: false,
+      deviceList: [],
+      myDeviceId: getDeviceId(),
+
       importUsedTxtRule: "",
 
       showAddUser: false,
@@ -1178,6 +1267,7 @@ export default {
       this.collapseMenu && !this.showNavigation ? "navigation-hidden" : "";
     window.shelfPage = this;
     this.init();
+    this.reportDevice();
     eventBus.$on("onSourceFileChange", (event, isRssSource) => {
       if (this._inactive) {
         return;
@@ -1480,7 +1570,10 @@ export default {
         origin: book.origin,
         originName: book.originName,
         latestChapterTitle: book.latestChapterTitle,
-        intro: book.intro
+        intro: book.intro,
+        // 章节内位置和时间，用于多设备阅读进度同步
+        durChapterPos: book.durChapterPos ?? 0,
+        durChapterTime: book.durChapterTime ?? 0
       });
       this.$router.push({
         path: "/reader" + (this.isSearchResult ? "?search=1" : "")
@@ -1660,6 +1753,16 @@ export default {
       this.isExploreResult = false;
       this.searchResult = [];
       this.loadingMore = false;
+    },
+    toggleShelfLayout() {
+      const next = this.shelfLayout === "list" ? "grid" : "list";
+      this.$store.commit("setShelfConfig", {
+        ...(this.$store.state.shelfConfig || {}),
+        layout: next
+      });
+      this.$nextTick(() => {
+        this.ensureLoadBookCover && this.ensureLoadBookCover();
+      });
     },
     toogleNight() {
       if (this.isNight) {
@@ -2135,6 +2238,106 @@ export default {
       this.userList = [];
       this.$store.commit("setIsManagerMode", false);
       this.init(true);
+    },
+    async checkSyncStatus() {
+      const loading = this.$loading({
+        lock: true,
+        text: "正在检查同步状态",
+        background: this.isNight ? "rgba(0,0,0,0.6)" : "rgba(255,255,255,0.7)"
+      });
+      try {
+        const res = await Axios.get(this.api + "/getSyncStatus");
+        loading.close();
+        if (!res.data.isSuccess) {
+          this.$message.error(res.data.errorMsg || "同步自检失败");
+          return;
+        }
+        const d = res.data.data;
+        const progressTime = d.lastProgressTime
+          ? new Date(d.lastProgressTime).format("yy-MM-dd hh:mm")
+          : "暂无";
+        const backupTime = d.latestBackupTime
+          ? new Date(d.latestBackupTime).format("yy-MM-dd hh:mm")
+          : "暂无";
+        const lines = [
+          `WebDAV 目录：${d.webdavHome}`,
+          `App 应填写：${location.origin}${d.webdavPath}`,
+          `进度目录：${d.progressDir || "尚未创建（先在阅读页同步一次即可）"}`,
+          `目录可写：${d.progressWritable ? "是" : "否"}`,
+          `进度文件：${d.progressCount} 个，最近写入 ${progressTime}`,
+          `备份文件：${d.backupCount} 个，最新 ${d.latestBackup || "无"}（${backupTime}）`
+        ];
+        this.$alert(lines.join("<br/>"), "同步自检", {
+          dangerouslyUseHTMLString: true,
+          confirmButtonText: "知道了"
+        });
+      } catch (error) {
+        loading.close();
+        this.$message.error("同步自检失败 " + (error && error.toString()));
+      }
+    },
+    reportDevice(book) {
+      if (!this.api) {
+        return;
+      }
+      const params = {
+        deviceId: this.myDeviceId,
+        deviceName: getDeviceName()
+      };
+      if (book) {
+        params.bookUrl = book.bookUrl;
+        params.bookName = book.name;
+        params.chapterTitle = book.durChapterTitle || "";
+      }
+      Axios.post(this.api + "/reportDevice", params, { silent: true }).catch(
+        () => {}
+      );
+    },
+    openDeviceDialog() {
+      this.showDeviceDialog = true;
+      this.loadDevices();
+    },
+    loadDevices() {
+      Axios.get(this.api + "/getDevices").then(
+        res => {
+          if (res.data.isSuccess) {
+            this.deviceList = res.data.data || [];
+          }
+        },
+        error => {
+          this.$message.error("加载设备列表失败 " + (error && error.toString()));
+        }
+      );
+    },
+    async removeDevice(row) {
+      const res = await this.$confirm(
+        `确定移除设备「${row.deviceName}」吗？`,
+        "提示",
+        {
+          confirmButtonText: "移除",
+          cancelButtonText: "取消",
+          type: "warning"
+        }
+      ).catch(() => false);
+      if (!res) {
+        return;
+      }
+      Axios.post(this.api + "/deleteDevice", { deviceId: row.deviceId }).then(
+        res => {
+          if (res.data.isSuccess) {
+            this.deviceList = this.deviceList.filter(
+              v => v.deviceId !== row.deviceId
+            );
+            this.$message.success("已移除");
+          }
+        },
+        error => {
+          this.$message.error("移除失败 " + (error && error.toString()));
+        }
+      );
+    },
+    deviceTime(t) {
+      return t ? this.dateFormat(t) : "—";
     },
     async backupToWebdav() {
       const res = await this.$confirm(
@@ -2730,7 +2933,7 @@ export default {
       );
     },
     getChapterListByRule() {
-      return Axios.post("/getChapterListByRule", this.importBookInfo).then(
+      return Axios.post(this.api + "/getChapterListByRule", this.importBookInfo).then(
         res => {
           if (res.data.isSuccess && res.data.data.book) {
             this.importBookInfo = res.data.data.book;
@@ -2800,6 +3003,14 @@ export default {
     },
     shelfBooks() {
       return this.$store.getters.shelfBooks;
+    },
+    shelfLayout() {
+      const config = this.$store.state.shelfConfig || {};
+      if (config.layout === "list" || config.layout === "grid") {
+        return config.layout;
+      }
+      // 未设置时按屏幕宽度给一个合理默认：窄屏单列，宽屏多列
+      return (window.innerWidth || 1024) < 750 ? "list" : "grid";
     },
     showShelfBooks() {
       return this.getShowShelfBooks(this.showBookGroup);
@@ -3254,9 +3465,10 @@ export default {
 
       .wrapper {
         display: grid ;
-        grid-template-columns: repeat(auto-fill, 380px);
-        justify-content: space-around;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        justify-content: stretch;
         grid-gap: 10px;
+        padding-bottom: 12px;
 
         .book {
           user-select: none;
@@ -3264,7 +3476,9 @@ export default {
           cursor: pointer;
           margin-bottom: 18px;
           padding: 24px 24px;
-          width: 360px;
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
           flex-direction: row;
           justify-content: space-around;
 
@@ -3351,6 +3565,49 @@ export default {
       .wrapper:last-child {
         margin-right: auto;
       }
+
+      // 单列列表模式：一行一本，适合窄屏 / 快速浏览
+      &.list {
+        .wrapper {
+          display: flex;
+          flex-direction: column;
+          grid-gap: 0;
+
+          .book {
+            padding: 12px 16px;
+            margin-bottom: 0;
+            border-bottom: 1px solid #eee;
+            justify-content: flex-start;
+            align-items: flex-start;
+
+            .cover-img,
+            .cover-img .cover {
+              width: 56px;
+              height: 76px;
+              flex-shrink: 0;
+            }
+
+            .info {
+              height: auto;
+              min-height: 76px;
+              margin-left: 14px;
+            }
+
+            .info .name {
+              max-height: 24px;
+              -webkit-line-clamp: 1;
+              margin-right: 56px;
+            }
+          }
+        }
+      }
+
+      // 多行多列网格模式：按容器宽度自动决定列数
+      &.grid {
+        .wrapper {
+          display: grid;
+        }
+      }
     }
 
     .books-wrapper::-webkit-scrollbar {
@@ -3395,6 +3652,9 @@ export default {
   }
   .book .info .intro, .book .info .dur-chapter, .book .info .last-chapter {
     color: #969ba3 !important;
+  }
+  >>>.books-wrapper.list .wrapper .book {
+    border-bottom-color: #333;
   }
 
   >>>.check-tip {

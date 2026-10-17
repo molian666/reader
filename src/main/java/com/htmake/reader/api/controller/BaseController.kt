@@ -326,6 +326,10 @@ open class BaseController(override val coroutineContext: CoroutineContext): Coro
 
             // 等待任何一个完成
             while (resultList.size <= 0) {
+                // 所有任务都已结束（可能全部失败），不能再空转，交给外层判断是否还有未派发的任务
+                if (deferredList.isEmpty()) {
+                    break
+                }
                 delay(10)
                 var stillDeferredList = arrayListOf<Deferred<Any>>()
                 for (i in 0 until deferredList.size) {

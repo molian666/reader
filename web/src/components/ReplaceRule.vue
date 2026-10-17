@@ -148,7 +148,7 @@ export default {
       );
     },
     toggleRuleEnabled(rule, isEnabled) {
-      Axios.post("/saveReplaceRule", { ...rule, isEnabled }).then(
+      Axios.post(this.api + "/saveReplaceRule", { ...rule, isEnabled }).then(
         res => {
           if (res.data.isSuccess) {
             this.$message.success("修改成功");

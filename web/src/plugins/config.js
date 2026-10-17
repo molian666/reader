@@ -69,7 +69,9 @@ const defaultNightConfig = {
 };
 const settings = {
   shelfConfig: {
-    showBookGroup: -1
+    showBookGroup: -1,
+    // 书架展示模式：grid = 多行多列，list = 单列列表
+    layout: "grid"
   },
   searchConfig: {
     searchType: "multi",

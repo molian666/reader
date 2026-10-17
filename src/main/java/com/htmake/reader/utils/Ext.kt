@@ -55,8 +55,9 @@ fun File.unzip(descDir: String): Boolean {
     val buffer = ByteArray(1024)
     var outputStream: OutputStream? = null
     var inputStream: InputStream? = null
+    var zf: ZipFile? = null
     try {
-        val zf = ZipFile(this.toString())
+        zf = ZipFile(this.toString())
         val entries = zf.entries()
         while (entries.hasMoreElements()) {
             val zipEntry: ZipEntry = entries.nextElement() as ZipEntry
@@ -76,6 +77,8 @@ fun File.unzip(descDir: String): Boolean {
                 }
                 inputStream.close()
                 outputStream.close()
+                inputStream = null
+                outputStream = null
             }
         }
         return true
@@ -84,6 +87,8 @@ fun File.unzip(descDir: String): Boolean {
     } finally {
         inputStream?.close()
         outputStream?.close()
+        // 必须关闭 ZipFile，否则 Windows 下会一直占用压缩包，导致后续覆盖/删除失败
+        zf?.close()
     }
     return false
 }

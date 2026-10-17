@@ -90,7 +90,7 @@ export default {
       }
       const rule = { ...this.ruleForm };
       // this.$store.commit("addFilterRule", rule);
-      Axios.post("/saveReplaceRule", rule).then(
+      Axios.post(this.api + "/saveReplaceRule", rule).then(
         res => {
           if (res.data.isSuccess) {
             this.$message.success(
