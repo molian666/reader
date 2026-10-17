@@ -2112,7 +2112,7 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         return true
     }
 
-    suspend fun syncBookProgressFromWebdav(progressFilePath: Any, userNameSpace: String) {
+    suspend fun syncBookProgressFromWebdav(progressFilePath: Any, userNameSpace: String, force: Boolean = false) {
         var progressFile: File? = null
         when (progressFilePath) {
             is File -> progressFile = progressFilePath
@@ -2124,13 +2124,21 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         var book = asJsonObject(progressFile.readText())?.mapTo(Book::class.java)
         if (book != null) {
             editShelfBook(book, userNameSpace) { existBook ->
-                // 只接受更新的进度，避免旧进度文件覆盖当前阅读位置
-                if (book.durChapterTime >= existBook.durChapterTime
+                // 阅读 App 主动上传（PUT）时 force=true：以设备刚上传的进度为准，
+                // 避免手机和服务器时钟不一致导致“退出App后服务端没更新”。
+                // 从备份包恢复时仍保留时间保护，防止旧备份回退进度。
+                if (force || book.durChapterTime >= existBook.durChapterTime
                     || book.durChapterIndex > existBook.durChapterIndex) {
                     existBook.durChapterIndex = book.durChapterIndex
                     existBook.durChapterPos = book.durChapterPos
                     existBook.durChapterTime = book.durChapterTime
                     existBook.durChapterTitle = book.durChapterTitle
+                } else {
+                    logger.info(
+                        "忽略较旧的阅读进度: bookTime={} localTime={} index={} localIndex={}",
+                        book.durChapterTime, existBook.durChapterTime,
+                        book.durChapterIndex, existBook.durChapterIndex
+                    )
                 }
 
                 logger.info("syncShelfBookProgress: {}", existBook)

@@ -207,6 +207,24 @@ C:\Windows\System32\storage
    ```
 4. 启动后重新点一次「还原」。
 
+**4.2 退出阅读 App 后服务端进度没更新**
+
+先确认服务端有没有收到进度文件：
+
+```
+C:\Reader\storage\data\<用户>\webdav\legado\bookProgress\<书名>_<作者>.json
+```
+
+看它的修改时间，或访问 `http://<IP>:<端口>/reader3/getBookProgress?url=<bookUrl>`。
+
+常见原因：
+
+1. **App 只在离开阅读页时上传**（`onPause`）。如果停在阅读页直接从最近任务里划掉，上传协程可能来不及完成；建议先返回书架，等 1~2 秒再退出。
+2. **安装的是 debug 包**：App 只有在 `!BuildConfig.DEBUG` 时才上传进度，debug 包不会同步。
+3. **WebDAV 未初始化或地址/账号错误**：`uploadBookProgress` 在 `authorization == null` 时直接返回，属于静默失败；可在 App 日志里搜“上传进度失败”。
+4. **开启了“同步增强”**：退出时会先拉云端进度，若认为云端更靠前就不上传；排查时可临时关闭。
+5. **服务端版本较旧**：旧版本按时间戳比较，手机和服务器时钟不一致时会丢弃进度。升级到最新 `reader-cli` 后，PUT 上传的进度一律以 App 为准。
+
 **5. 安全建议**
 
 - 对外网开放时，建议在 `application.yml`/启动参数里开启 `reader.app.secure=true` 并配置用户，或只在反向代理（Nginx/IIS）后暴露；

@@ -360,7 +360,7 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             val bookController = BookController(coroutineContext)
             // 阅读 App 上传进度文件时，立即同步到服务端书架
             if (file.parentFile?.name == "bookProgress" && file.name.endsWith(".json", true)) {
-                bookController.syncBookProgressFromWebdav(file, userNameSpace)
+                bookController.syncBookProgressFromWebdav(file, userNameSpace, true)
             }
             // 阅读 App 上传备份时，按文件名中的设备名记录设备
             if (file.name.startsWith("backup", true) && file.name.endsWith(".zip", true)) {

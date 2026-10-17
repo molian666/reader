@@ -21,6 +21,7 @@
 - ZIP 句柄未关闭导致 Windows 下文件被占用、恢复/覆盖随机失败。
 - 并发任务全部失败时接口永久挂起。
 - Windows 服务使用绝对 `reader.app.storagePath` 时，WebDAV 上传与还原会写到进程工作目录（如 `C:\Windows\System32\storage`），表现为“还原成功但书架为空”；现已统一按 `storagePath` 解析，并给计划任务设置工作目录。
+- 阅读 App 上传进度（PUT `bookProgress/*.json`）时，服务端现在以该进度为准，不再因手机与服务器时钟不一致而丢弃，修复“退出 App 后服务端进度没更新”。
 
 ## 安装
 
