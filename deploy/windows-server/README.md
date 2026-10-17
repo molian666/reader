@@ -75,6 +75,44 @@ Get-ScheduledTask   -TaskName LegadoReader
 
 或直接重新运行 `install.bat`（脚本会停旧任务、替换 jar、重建任务并启动）。
 
+## 迁移旧数据
+
+所有持久化数据都在 `storage` 目录（纯 JSON 文件，没有数据库），可以直接继承。
+
+### 从旧版 reader 服务器迁移
+
+把旧服务器的 `storage` 目录拷到本机，然后：
+
+```powershell
+.\migrate-data.ps1 -Source "D:\old-reader\storage" -InstallDir "C:\Reader"
+```
+
+或双击 `migrate-data.bat`，按提示输入旧 `storage` 路径。
+
+脚本会：
+
+- 自动识别「新版多用户结构（`data\<用户>\`）」或「旧版扁平结构（根目录 `bookshelf.json` 等）」；
+- 旧结构会转换到 `data\default\`，`users.json` 放到 `data\`，`localStore` / `assets` / `cache` 归位；
+- 迁移前把现有 `storage` 备份为 `storage-backup-时间戳`；
+- 默认只复制，加 `-Move` 才删除源目录；目录已有数据时需加 `-Force`。
+
+迁移完成后 `start.bat`，打开页面确认书架、书源、WebDAV 文件都在。
+
+### 从桌面安装版迁移
+
+停掉桌面程序，把 `%LOCALAPPDATA%\LegadoReader\storage` 复制到 `C:\Reader\storage` 即可（结构完全一致）。
+
+### 从 Docker 迁移
+
+把容器挂载的 storage 卷目录复制出来，按上面的方式迁移。
+
+### 从阅读 App 迁移
+
+不需要搬目录：App 里「备份到 WebDAV」→ Web 端左侧菜单「WebDAV → 文件管理」找到备份 zip →「还原」。
+阅读进度会随 `bookProgress/*.json` 一起同步。
+
+> 注意：旧版本如果用的是未转义的进度文件名（书名含 `? : / \` 等字符），App 可能匹配不到对应文件，需要按 App 规则重命名；普通书名不受影响。
+
 ## 目录结构
 
 ```
