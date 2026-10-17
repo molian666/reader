@@ -20,6 +20,7 @@
 - 备份时本地书源/分组/RSS/书签被移走导致数据丢失。
 - ZIP 句柄未关闭导致 Windows 下文件被占用、恢复/覆盖随机失败。
 - 并发任务全部失败时接口永久挂起。
+- Windows 服务使用绝对 `reader.app.storagePath` 时，WebDAV 上传与还原会写到进程工作目录（如 `C:\Windows\System32\storage`），表现为“还原成功但书架为空”；现已统一按 `storagePath` 解析，并给计划任务设置工作目录。
 
 ## 安装
 

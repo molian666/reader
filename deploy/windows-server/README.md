@@ -189,6 +189,24 @@ Get-ScheduledTaskInfo -TaskName LegadoReader
 数据全部在 `storage` 下。迁移服务器时，停服务后复制整个 `storage` 目录即可。
 App 的 WebDAV 地址填 `http://<服务器IP>:<端口>/reader3/webdav/`，子目录保持 `legado`。
 
+**4.1 还原成功但书架为空**
+
+旧版脚本（2026-10-18 之前生成的 jar）在绝对 `storagePath` 下会把 WebDAV 文件写到进程工作目录，常见位置：
+
+```
+C:\Windows\System32\storage
+```
+
+处理方式：
+
+1. 停止任务：`Stop-ScheduledTask -TaskName LegadoReader`；
+2. 用最新 `reader-cli-2.5.4.jar` 覆盖安装目录的 `reader-cli.jar`（或重新运行最新 `install.bat`）；
+3. 把误写目录里的内容复制回来：
+   ```powershell
+   robocopy C:\Windows\System32\storage C:\Reader\storage /E
+   ```
+4. 启动后重新点一次「还原」。
+
 **5. 安全建议**
 
 - 对外网开放时，建议在 `application.yml`/启动参数里开启 `reader.app.secure=true` 并配置用户，或只在反向代理（Nginx/IIS）后暴露；

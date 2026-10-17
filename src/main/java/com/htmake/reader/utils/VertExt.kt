@@ -67,8 +67,8 @@ fun RoutingContext.error(throwable: Throwable) {
             .end(errorJson)
 }
 
-fun getWorkDir(subPath: String = ""): String {
-    if (!workDirInit && workDirPath.isEmpty()) {
+private fun ensureWorkDir() {
+    if (!workDirInit || workDirPath.isEmpty()) {
         var osName = System.getProperty("os.name")
         var currentDir = System.getProperty("user.dir")
         logger.info("osName: {} currentDir: {}", osName, currentDir)
@@ -80,9 +80,18 @@ fun getWorkDir(subPath: String = ""): String {
         }
         workDirInit = true
     }
-    var path = Paths.get(workDirPath, subPath);
+}
 
-    return path.toString();
+fun getWorkDir(subPath: String = ""): String {
+    ensureWorkDir()
+    val normalized = subPath.replace('\\', '/').trimStart('/')
+    if (normalized.startsWith("storage/")) {
+        // reader.app.storagePath 可能是绝对路径，此时 storage/... 必须相对于它解析，
+        // 否则数据会写到进程工作目录（如 C:\Windows\System32\storage）导致“还原成功但书架为空”
+        val rest = normalized.substring("storage/".length)
+        return Paths.get(resolveStorageRoot(), rest).toString()
+    }
+    return Paths.get(workDirPath, subPath).toString()
 }
 
 fun getWorkDir(vararg subDirFiles: String): String {
@@ -96,7 +105,7 @@ fun getRelativePath(vararg subDirFiles: String): String {
             path.append(File.separator).append(it)
         }
     }
-    return path.toString().let{
+    return path.toString().let {
         if (it.startsWith("/")) {
             it.substring(1)
         } else {
@@ -105,24 +114,43 @@ fun getRelativePath(vararg subDirFiles: String): String {
     }
 }
 
+private fun resolveStorageRoot(): String {
+    if (storageFinalPath.isNotEmpty()) {
+        return storageFinalPath
+    }
+    ensureWorkDir()
+    var appConfig: AppConfig? = null
+    try {
+        appConfig = SpringContextUtils.getBean("appConfig", AppConfig::class.java)
+    } catch (e: Exception) {
+        // Spring 上下文尚未就绪
+    }
+    var configured = "storage"
+    try {
+        val path = appConfig?.storagePath
+        if (!path.isNullOrEmpty()) {
+            configured = path
+        }
+    } catch (e: Exception) {
+        // storagePath 还未初始化
+    }
+    val storageDir = File(configured)
+    val root = if (storageDir.isAbsolute) {
+        storageDir.toString()
+    } else {
+        Paths.get(workDirPath, configured).toString()
+    }
+    if (appConfig != null) {
+        storageFinalPath = root
+    }
+    return root
+}
+
 fun getStoragePath(): String {
     if (storageFinalPath.isNotEmpty()) {
-        return storageFinalPath;
+        return storageFinalPath
     }
-    var appConfig = SpringContextUtils.getBean("appConfig", AppConfig::class.java)
-    var storageDir = File("storage")
-    if (appConfig != null) {
-        // logger.info("storagePath from appConfig: {}", appConfig.storagePath)
-        storageDir = File(appConfig.storagePath)
-    }
-    if (storageDir.isAbsolute()) {
-        return storageDir.toString();
-    }
-    var storagePath = getWorkDir(storageDir.toString())
-    if (appConfig != null) {
-        storageFinalPath = storagePath
-    }
-    return storagePath;
+    return resolveStorageRoot()
 }
 
 fun saveStorage(vararg name: String, value: Any, pretty: Boolean = false) {

@@ -80,6 +80,13 @@ $logsDir = Join-Path $InstallDir "logs"
 New-Item -ItemType Directory -Force -Path $storageDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
+# 旧版脚本曾把数据写到 System32\storage（未设置工作目录 + 绝对 storagePath），这里给出提示
+$wrongStorage = Join-Path $env:SystemRoot "System32\storage"
+if (Test-Path $wrongStorage) {
+    Write-Host ("[!] 检测到旧版本可能把数据写到了: " + $wrongStorage) -ForegroundColor Yellow
+    Write-Host "    请停止服务后用 migrate-data.ps1 迁移，或手动把该目录内容复制到安装目录的 storage。"
+}
+
 $javaExe = Join-Path $InstallDir "runtime\bin\java.exe"
 $runtimeDir = Join-Path $InstallDir "runtime"
 
@@ -149,7 +156,12 @@ if ($Secure) {
 }
 
 Write-Step "注册计划任务（开机自启，SYSTEM 账户）..."
-$action = New-ScheduledTaskAction -Execute $javaExe -Argument $javaArgs
+try {
+    $action = New-ScheduledTaskAction -Execute $javaExe -Argument $javaArgs -WorkingDirectory $InstallDir
+} catch {
+    # 老版本 PowerShell 不支持 -WorkingDirectory 时退化为默认工作目录
+    $action = New-ScheduledTaskAction -Execute $javaExe -Argument $javaArgs
+}
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
