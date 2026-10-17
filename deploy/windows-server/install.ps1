@@ -33,7 +33,10 @@ param(
     [string]$JarPath = "",
     [string]$RuntimeZip = "",
     [string]$DownloadBase = "https://github.com/molian666/reader/releases/download/v2.5.4",
-    [switch]$NoFirewall
+    [switch]$NoFirewall,
+    [switch]$Secure,
+    [string]$SecureKey = "",
+    [string]$InviteCode = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -134,6 +137,16 @@ $javaArgs = '-Djava.awt.headless=true -Dreader.app.showUI=false -Xms256m -Xmx102
     ('--reader.server.port={0} ' -f $Port) +
     ('--reader.server.webUrl=http://localhost:{0} ' -f $Port) +
     ('--reader.app.storagePath="{0}"' -f $storageDir)
+
+if ($Secure) {
+    $javaArgs += ' --reader.app.secure=true'
+    if ($SecureKey -ne "") {
+        $javaArgs += (' --reader.app.secureKey="{0}"' -f $SecureKey)
+    }
+    if ($InviteCode -ne "") {
+        $javaArgs += (' --reader.app.inviteCode="{0}"' -f $InviteCode)
+    }
+}
 
 Write-Step "注册计划任务（开机自启，SYSTEM 账户）..."
 $action = New-ScheduledTaskAction -Execute $javaExe -Argument $javaArgs

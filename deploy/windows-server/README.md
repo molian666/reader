@@ -48,6 +48,9 @@ http://<服务器IP>:8080
 | `-JarPath` / `-RuntimeZip` | 指定离线包路径 |
 | `-DownloadBase` | 下载地址前缀（默认当前 Release） |
 | `-NoFirewall` | 不创建防火墙规则（由硬件防火墙统一管理时使用） |
+| `-Secure` | 开启登录 / 多用户模式（迁移旧多用户数据时必须开启） |
+| `-SecureKey` | 管理密码，配合 `-Secure` 使用 |
+| `-InviteCode` | 注册邀请码，配合 `-Secure` 使用 |
 
 ## 日常管理
 
@@ -112,6 +115,37 @@ Get-ScheduledTask   -TaskName LegadoReader
 阅读进度会随 `bookProgress/*.json` 一起同步。
 
 > 注意：旧版本如果用的是未转义的进度文件名（书名含 `? : / \` 等字符），App 可能匹配不到对应文件，需要按 App 规则重命名；普通书名不受影响。
+
+### 配置项（端口、登录开关、账号密码）不会随 storage 自动迁移
+
+`storage` 里只有业务数据，端口和登录开关在启动参数/`application.yml` 里，需要重新指定：
+
+| 配置 | 存放位置 | 迁移方式 |
+|---|---|---|
+| 端口 | `application.yml` / 启动参数 | 安装时用 `-Port 9000` 指定（数据里没有端口） |
+| 登录开关 `secure` | `application.yml` | 用 `-Secure` 开启；**旧版开过就必须开** |
+| 管理密码 `secureKey` | `application.yml` | `-SecureKey "你的管理密码"` |
+| 注册邀请码 `inviteCode` | `application.yml` | `-InviteCode "邀请码"` |
+| 用户账号、密码哈希、Token、WebDAV 开关 | `storage/data/users.json` | 随 storage 自动迁移 |
+| 每个用户的书架、书源、书签、进度、WebDAV 文件 | `storage/data/<用户名>/` | 随 storage 自动迁移 |
+| 本地书仓 | `storage/localStore/` | 随 storage 自动迁移 |
+| 自定义样式/资源 | `storage/assets/` | 随 storage 自动迁移 |
+
+**最容易踩的坑**：旧部署如果开了登录（多用户），新部署必须加 `-Secure`，否则服务会以 `secure=false` 运行，只读 `data/default`，原来 `data/<用户名>/` 下的书架会看起来“全部丢失”。
+
+迁移多用户实例的完整命令示例：
+
+```powershell
+# 1. 先装好（开启登录，管理密码和旧版保持一致）
+.\install.ps1 -Port 8080 -Secure -SecureKey "旧版管理密码" -InviteCode "旧版邀请码"
+
+# 2. 停服务后迁移数据
+Stop-ScheduledTask -TaskName LegadoReader
+.\migrate-data.ps1 -Source "D:\old-reader\storage" -InstallDir "C:\Reader" -Force
+
+# 3. 启动并用原账号登录
+.\start.ps1
+```
 
 ## 目录结构
 

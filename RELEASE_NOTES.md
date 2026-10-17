@@ -57,6 +57,8 @@ java -jar reader-2.5.4.jar
 
 把脚本目录复制到服务器，右键 `install.bat` 以管理员身份运行即可。默认安装到 `C:\Reader`、端口 `8080`，注册开机自启计划任务并开放防火墙，不需要预装 Java。管理命令：`start.bat` / `stop.bat` / `status.bat` / `uninstall.bat`。
 
+迁移旧服务器数据：把旧 `storage` 复制到服务器后运行 `migrate-data.bat`，脚本会自动识别新旧目录结构并转换。注意 **端口、登录开关（`-Secure`）、管理密码、邀请码不在 storage 里**，需要在安装时重新指定；旧版开启过多用户就必须加 `-Secure`，否则只会读到 `data/default`。
+
 ## 校验
 
 见 `SHA256SUMS.txt`。
