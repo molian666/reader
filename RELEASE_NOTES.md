@@ -48,6 +48,15 @@ java -jar reader-2.5.4.jar
 
 或用仓库内 `Dockerfile.source` 构建镜像。
 
+### Windows Server（2012 R2 / 2016 / 2019 / 2022）
+
+仓库 `deploy/windows-server/` 提供一键部署脚本，配套本次新增的两个资产：
+
+- `reader-cli-2.5.4.jar`：无界面服务端，不含 JavaFX；
+- `reader-runtime-win64.zip`：精简 JRE 11（约 30 MB）。
+
+把脚本目录复制到服务器，右键 `install.bat` 以管理员身份运行即可。默认安装到 `C:\Reader`、端口 `8080`，注册开机自启计划任务并开放防火墙，不需要预装 Java。管理命令：`start.bat` / `stop.bat` / `status.bat` / `uninstall.bat`。
+
 ## 校验
 
 见 `SHA256SUMS.txt`。

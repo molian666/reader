@@ -64,6 +64,19 @@
 
 安装包构建方法见 [installer/README.md](installer/README.md)，发布说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
+## Windows Server 一键部署
+
+`deploy/windows-server/` 提供适用于 **Windows Server 2012 R2 / 2016 / 2019 / 2022** 的部署脚本：
+
+1. 把 `deploy/windows-server` 目录复制到服务器；
+2. 右键 **`install.bat` → 以管理员身份运行**；
+3. 默认安装到 `C:\Reader`、端口 `8080`，注册开机自启计划任务，自带精简 JRE，无需预装 Java。
+
+管理命令：`start.bat` / `stop.bat` / `status.bat` / `uninstall.bat`。
+离线部署、自定义端口与目录、升级方法见 [deploy/windows-server/README.md](deploy/windows-server/README.md)。
+
+> 服务器使用无界面的 `reader-cli-2.5.4.jar`（不含 JavaFX），桌面版仍使用上面的安装包。
+
 ## 本地构建与运行
 
 需要 JDK 11 与 Node.js（建议 16 及以上）。
