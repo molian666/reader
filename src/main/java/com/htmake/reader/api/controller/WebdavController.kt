@@ -358,9 +358,14 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             file.writeBytes(context.getBody().getBytes())
             val userNameSpace = getUserNameSpace(context)
             val bookController = BookController(coroutineContext)
-            // 阅读 App 上传进度文件时，立即同步到服务端书架
+            val clientIp = context.request().getHeader("X-Forwarded-For")
+                ?.split(",")?.firstOrNull()?.trim()
+                ?: context.request().remoteAddress()?.host()
+            val userAgent = context.request().getHeader("User-Agent")
+            // 阅读 App 上传进度文件时，立即同步到服务端书架，并刷新设备“最近活跃/正在读”
             if (file.parentFile?.name == "bookProgress" && file.name.endsWith(".json", true)) {
-                bookController.syncBookProgressFromWebdav(file, userNameSpace, true)
+                val progressBook = bookController.syncBookProgressFromWebdav(file, userNameSpace, true)
+                bookController.touchWebdavDevice(userNameSpace, clientIp, userAgent, progressBook)
             }
             // 阅读 App 上传备份时，按文件名中的设备名记录设备
             if (file.name.startsWith("backup", true) && file.name.endsWith(".zip", true)) {
@@ -369,8 +374,8 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
                     userNameSpace,
                     "webdav:$deviceName",
                     deviceName,
-                    userAgent = context.request().getHeader("User-Agent"),
-                    ip = context.request().remoteAddress()?.host()
+                    userAgent = userAgent,
+                    ip = clientIp
                 )
             }
             context.response().setStatusCode(201).end()

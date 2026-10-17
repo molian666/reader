@@ -2112,14 +2112,14 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         return true
     }
 
-    suspend fun syncBookProgressFromWebdav(progressFilePath: Any, userNameSpace: String, force: Boolean = false) {
+    suspend fun syncBookProgressFromWebdav(progressFilePath: Any, userNameSpace: String, force: Boolean = false): Book? {
         var progressFile: File? = null
         when (progressFilePath) {
             is File -> progressFile = progressFilePath
             is String -> progressFile = File(progressFilePath)
         }
         if (progressFile == null) {
-            return
+            return null
         }
         var book = asJsonObject(progressFile.readText())?.mapTo(Book::class.java)
         if (book != null) {
@@ -2145,6 +2145,40 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 existBook
             }
         }
+        return book
+    }
+
+    /**
+     * 阅读 App 通过 WebDAV 上传进度时同步更新设备列表。
+     * App 不会调用 reportDevice，这里按来源 IP 匹配已登记的 WebDAV 设备（备份文件名里的设备名）。
+     */
+    fun touchWebdavDevice(userNameSpace: String, ip: String?, userAgent: String?, book: Book?) {
+        val address = ip?.trim().orEmpty()
+        var deviceId: String? = null
+        var deviceName: String? = null
+        try {
+            val devices = asJsonArray(getUserStorage(userNameSpace, "devices")) ?: JsonArray()
+            val matched = devices
+                .map { it as JsonObject }
+                .filter {
+                    it.getString("deviceId")?.startsWith("webdav:") == true &&
+                        address.isNotEmpty() && it.getString("ip") == address
+                }
+                .maxByOrNull { it.getLong("lastActive") ?: 0L }
+            if (matched != null) {
+                deviceId = matched.getString("deviceId")
+                deviceName = matched.getString("deviceName")
+            }
+        } catch (e: Exception) {
+            // 设备列表损坏时忽略，不影响进度同步
+        }
+        val id = deviceId ?: ("webdav:ip:" + address.ifEmpty { "unknown" })
+        val name = deviceName ?: "阅读 App"
+        touchDevice(
+            userNameSpace, id, name,
+            book?.bookUrl, book?.name, book?.durChapterTitle,
+            userAgent, address
+        )
     }
 
     // 每本书的进度写入锁，避免多设备同时保存时写出半截 JSON
