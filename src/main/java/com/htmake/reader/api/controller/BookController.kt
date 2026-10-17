@@ -2010,6 +2010,8 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
         }
         // 遍历判断书本是否存在
         var existIndex: Int = -1
+        var nameOnlyIndex: Int = -1
+        var nameOnlyTime: Long = Long.MIN_VALUE
         for (i in 0 until bookshelf.size()) {
             var _book = bookshelf.getJsonObject(i).mapTo(Book::class.java)
             // 根据书籍链接查找
@@ -2017,11 +2019,27 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
                 existIndex = i
                 break;
             }
-            // 根据作者和书名查找
-            if (book.name.isNotEmpty() && _book.name.equals(book.name) && book.author.isNotEmpty() && _book.author.equals(book.author)) {
-                existIndex = i
-                break;
+            if (book.name.isNotEmpty() && _book.name.equals(book.name)) {
+                // 根据作者和书名查找
+                if (book.author.isNotEmpty() && _book.author.equals(book.author)) {
+                    existIndex = i
+                    break;
+                }
+                // 书名相同、作者都为空（App 进度里 author 可能为空，如“白骨大圣_.json”）
+                if (book.author.isEmpty() && _book.author.isEmpty()) {
+                    existIndex = i
+                    break;
+                }
+                // App 没传作者时，退化为按书名匹配；多本同名书取最近阅读的那本
+                if (book.author.isEmpty() && _book.durChapterTime >= nameOnlyTime) {
+                    nameOnlyIndex = i
+                    nameOnlyTime = _book.durChapterTime
+                }
             }
+        }
+        if (existIndex < 0 && nameOnlyIndex >= 0) {
+            existIndex = nameOnlyIndex
+            logger.info("editShelfBook 按书名匹配（作者为空）: {}", book.name)
         }
         if (existIndex >= 0) {
             var bookList = bookshelf.getList()
