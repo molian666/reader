@@ -30,6 +30,8 @@ import com.htmake.reader.utils.toDataClass
 import com.htmake.reader.utils.toMap
 import com.htmake.reader.utils.fillData
 import com.htmake.reader.utils.getWorkDir
+import com.htmake.reader.utils.getStoragePath
+import com.htmake.reader.utils.SyncDebug
 import com.htmake.reader.utils.getRandomString
 import com.htmake.reader.utils.genEncryptedPassword
 import com.htmake.reader.entity.User
@@ -2271,16 +2273,56 @@ class BookController(coroutineContext: CoroutineContext): BaseController(corouti
             ?: emptyList()
         val latestBackup = backups.maxByOrNull { it.lastModified() }
         val latestProgress = progressFiles.maxByOrNull { it.lastModified() }
+        val jarPath = System.getProperty("java.class.path")
+            ?.split(File.pathSeparator)?.firstOrNull() ?: ""
+        val progressDetails = progressFiles
+            .sortedByDescending { it.lastModified() }
+            .take(50)
+            .map { f ->
+                val json = try { asJsonObject(f.readText()) } catch (e: Exception) { null }
+                mapOf(
+                    "file" to f.name,
+                    "mtime" to f.lastModified(),
+                    "name" to (json?.getString("name") ?: ""),
+                    "author" to (json?.getString("author") ?: ""),
+                    "index" to (json?.getInteger("durChapterIndex", 0) ?: 0),
+                    "title" to (json?.getString("durChapterTitle") ?: ""),
+                    "time" to (json?.getLong("durChapterTime", 0L) ?: 0L)
+                )
+            }
+        val shelfArray = asJsonArray(getUserStorage(userNameSpace, "bookshelf")) ?: JsonArray()
+        val shelfDetails = (0 until shelfArray.size()).mapNotNull { i ->
+            try { shelfArray.getJsonObject(i) } catch (e: Exception) { null }
+        }.take(50).map { b ->
+            mapOf(
+                "name" to (b.getString("name") ?: ""),
+                "author" to (b.getString("author") ?: ""),
+                "index" to (b.getInteger("durChapterIndex", 0) ?: 0),
+                "title" to (b.getString("durChapterTitle") ?: ""),
+                "time" to (b.getLong("durChapterTime", 0L) ?: 0L)
+            )
+        }
         return returnData.setData(mapOf(
+            "serverTime" to System.currentTimeMillis(),
+            "storagePath" to getStoragePath(),
+            "jarPath" to jarPath,
+            "jarMtime" to (if (jarPath.isNotEmpty()) File(jarPath).lastModified() else 0L),
+            "logPath" to (System.getProperty("logging.path") ?: ""),
             "webdavHome" to userHome,
             "webdavPath" to "/reader3/webdav/legado/",
             "progressDir" to (progressDir?.absolutePath ?: ""),
             "progressWritable" to (progressDir != null && progressDir.canWrite()),
             "progressCount" to progressFiles.size,
             "lastProgressTime" to (latestProgress?.lastModified() ?: 0L),
+            "progressFiles" to progressDetails,
+            "lastAppPutTime" to SyncDebug.lastAppPutTime,
+            "lastAppPutPath" to SyncDebug.lastAppPutPath,
+            "lastAppPutIp" to SyncDebug.lastAppPutIp,
+            "lastAppPutBytes" to SyncDebug.lastAppPutBytes,
             "backupCount" to backups.size,
             "latestBackup" to (latestBackup?.name ?: ""),
-            "latestBackupTime" to (latestBackup?.lastModified() ?: 0L)
+            "latestBackupTime" to (latestBackup?.lastModified() ?: 0L),
+            "shelfBooks" to shelfDetails
         ))
     }
 

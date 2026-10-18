@@ -35,6 +35,7 @@ import com.htmake.reader.utils.unzip
 import com.htmake.reader.utils.zip
 import com.htmake.reader.utils.jsonEncode
 import com.htmake.reader.utils.getRelativePath
+import com.htmake.reader.utils.SyncDebug
 import com.htmake.reader.verticle.RestVerticle
 import com.htmake.reader.SpringEvent
 import org.springframework.stereotype.Component
@@ -362,6 +363,10 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
                 ?.split(",")?.firstOrNull()?.trim()
                 ?: context.request().remoteAddress()?.host()
             val userAgent = context.request().getHeader("User-Agent")
+            logger.info("WebDAV PUT {} ({} bytes) from {} ua={}", path, file.length(), clientIp, userAgent)
+            if (userAgent?.startsWith("Legado", true) == true) {
+                SyncDebug.recordPut(path, clientIp, file.length())
+            }
             // 阅读 App 上传进度文件时，立即同步到服务端书架，并刷新设备“最近活跃/正在读”
             if (file.parentFile?.name == "bookProgress" && file.name.endsWith(".json", true)) {
                 val progressBook = bookController.syncBookProgressFromWebdav(file, userNameSpace, true)
