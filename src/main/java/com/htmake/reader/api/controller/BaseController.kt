@@ -287,6 +287,12 @@ open class BaseController(override val coroutineContext: CoroutineContext): Coro
         if (!file.exists()) {
             file.mkdirs()
         }
+        // 提前创建阅读 App 使用的目录，避免 App 初始化失败后 PROPFIND 404 / PUT 409
+        var legadoDir = File(file, "legado")
+        legadoDir.mkdirs()
+        File(legadoDir, "bookProgress").mkdirs()
+        File(legadoDir, "books").mkdirs()
+        File(legadoDir, "background").mkdirs()
         return prefix
     }
 

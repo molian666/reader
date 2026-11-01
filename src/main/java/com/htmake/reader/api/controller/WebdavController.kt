@@ -75,6 +75,15 @@ import kotlinx.coroutines.CoroutineScope
 
 private val logger = KotlinLogging.logger {}
 
+private fun xmlEscape(value: String): String {
+    if (value.isEmpty()) return value
+    return value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&apos;")
+}
+
 class WebdavController(coroutineContext: CoroutineContext, router: Router, onHandlerError: (RoutingContext, Exception) -> Unit): BaseController(coroutineContext) {
 
     init {
@@ -289,13 +298,14 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
 
         // 只支持一级
         var formatter = { f: File, url: String, showName: Boolean ->
-            var name = if(showName) f.name else ""
+            var name = xmlEscape(if(showName) f.name else "")
+            var safeUrl = xmlEscape(url)
             // 阅读 App 使用 RFC 1123 解析 getlastmodified，格式不对会被当成 0，导致进度/备份判断失效
             var modifiedDate = rfc1123Format.format(Date(f.lastModified()))
             if (f.isFile()) {
-                String.format(fileResponse, url, modifiedDate, modifiedDate, name, f.length(), "")
+                String.format(fileResponse, safeUrl, modifiedDate, modifiedDate, name, f.length(), "")
             } else {
-                String.format(dirResponse, url, modifiedDate, modifiedDate, name)
+                String.format(dirResponse, safeUrl, modifiedDate, modifiedDate, name)
             }
         }
 
@@ -310,7 +320,8 @@ class WebdavController(coroutineContext: CoroutineContext, router: Router, onHan
             fileUrl = if (fileUrl.endsWith("/")) fileUrl else fileUrl + "/"
             response = formatter(file, fileUrl, false)
             file.listFiles().forEach {
-                val fileName = URLEncoder.encode(it.name, "UTF-8")
+                // 路径里空格必须编码成 %20，URLEncoder 默认的 + 会被 App 解码成空格导致 URL 非法、备份被跳过
+                val fileName = URLEncoder.encode(it.name, "UTF-8").replace("+", "%20")
                 response = response + formatter(it, fileUrl + fileName, true)
             }
             response = String.format(xml, response)

@@ -26,6 +26,8 @@
 - 修复 App 进度作者为空时（`书名_.json`）无法匹配书架、进度不更新的问题：书架匹配支持按书名回退，同名多本取最近阅读的一本。
 - 默认 profile 也输出文件日志（`logs/reader-*.log`），不再只写控制台；服务端每次 WebDAV PUT 记录路径、IP、User-Agent，便于排查 App 是否上传。
 - `/reader3/getSyncStatus` 扩展为同步诊断：返回 storagePath、jar 路径/时间、进度文件明细、书架进度、最近一次 App PUT 时间。
+- WebDAV 首次访问自动创建 `legado/`、`bookProgress/`、`books/`、`background/`，修复服务器数据目录迁移后 App“测试正常但无法获取备份信息”、进度 PUT 返回 409 的问题。
+- 列表 href 中的空格改为 `%20`，显示名做 XML 转义，修复设备名带空格或 `&` 时备份文件被跳过、备份列表异常。
 
 ## 安装
 
